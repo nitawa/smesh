@@ -263,6 +263,11 @@ public:
                                   SMESH::NumericalFunctor_ptr   Criterion);
   void           SplitVolumesIntoTetra(SMESH::SMESH_IDSource_ptr elems,
                                        CORBA::Short             methodFlags);
+  void           SplitVolumesIntoTetraWithPeriodicity(SMESH::SMESH_IDSource_ptr elems,
+                                                      CORBA::Short             methodFlags,
+                                                      SMESH::SMESH_IDSource_ptr inlet,
+                                                      SMESH::SMESH_IDSource_ptr outlet,
+                                                      CORBA::Boolean           avoidOverConstrainedVolumes);
   void           SplitVolumesIntoTetraAvoidOverConstrainedVolumes(SMESH::SMESH_IDSource_ptr elems,
                                                                   CORBA::Short              methodFlags);
   void           SplitHexahedraIntoPrisms(SMESH::SMESH_IDSource_ptr  elems,

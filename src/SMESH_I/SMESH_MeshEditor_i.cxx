@@ -2317,6 +2317,113 @@ void SMESH_MeshEditor_i::SplitVolumesIntoTetraAvoidOverConstrainedVolumes(SMESH:
   SMESH_CATCH( SMESH::throwCorbaException );
 }
 
+//============================================================================================
+/*!
+ * \brief Split volumic elements into tetrahedrons and preserving input periodicity
+ */
+//============================================================================================
+
+void SMESH_MeshEditor_i::SplitVolumesIntoTetraWithPeriodicity(SMESH::SMESH_IDSource_ptr elems,
+                                                              CORBA::Short              methodFlags,
+                                                              SMESH::SMESH_IDSource_ptr inlet,
+                                                              SMESH::SMESH_IDSource_ptr outlet,
+                                                              CORBA::Boolean           avoidOverConstrainedVolumes)
+{
+  SMESH_TRY;
+  initData();
+
+  // SMESH::SMESH_IDSource_ptr sources[] = { elems, inlet, outlet };
+  // TIDSortedElemSet faces[2];
+  // for ( int i = 0; i < 3; ++i )
+  // {
+  //   if ( CORBA::is_nil( sources[i] ))
+  //     THROW_SALOME_CORBA_EXCEPTION("Periodicity requires volumes, inlet and outlet", SALOME::BAD_PARAM);
+
+  //   SMESH::SMESH_Mesh_var mesh = sources[i]->GetMesh();
+  //   if (( !CORBA::is_nil( mesh ) && mesh->GetId() != myMesh_i->GetId() ) ||
+  //       ( CORBA::is_nil( mesh ) && !SMESH::DownCast<SMESH::Filter_i*>( sources[i] )))
+  //     THROW_SALOME_CORBA_EXCEPTION("Wrong mesh of periodic IDSource", SALOME::BAD_PARAM);
+
+  //   prepareIdSource( sources[i] );
+  //   if ( i == 0 ) continue;
+
+  //   SMESH::array_of_ElementType_var types = sources[i]->GetTypes();
+  //   if ( types->length() != 1 || types[0] != SMESH::FACE )
+  //     THROW_SALOME_CORBA_EXCEPTION("Inlet and outlet must be FACE sources", SALOME::BAD_PARAM);
+
+  //   SMESH::smIdType_array_var ids = sources[i]->GetIDs();
+  //   if ( ids->length() == 0 )
+  //     THROW_SALOME_CORBA_EXCEPTION("Inlet and outlet must not be empty", SALOME::BAD_PARAM);
+  //   for ( CORBA::ULong j = 0; j < ids->length(); ++j )
+  //   {
+  //     const SMDS_MeshElement* face = getMeshDS()->FindElement( ids[j] );
+  //     if ( !face || face->GetType() != SMDSAbs_Face )
+  //       THROW_SALOME_CORBA_EXCEPTION("Invalid face in inlet or outlet", SALOME::BAD_PARAM);
+  //     faces[i-1].insert( face );
+  //   }
+  // }
+
+
+
+
+
+  
+  ::SMESH_MeshEditor::TFacetOfElem elemSet;
+  const int noneFacet = -1;
+  prepareIdSource( elems );
+  if ( SMDS_ElemIteratorPtr volIt = myMesh_i->GetElements( elems, SMESH::VOLUME ))
+    while ( volIt->more() )
+      elemSet.insert( elemSet.end(), make_pair( volIt->next(), noneFacet ));
+
+
+  TIDSortedElemSet faces[2];
+  SMESH::SMESH_IDSource_ptr faceSources[] = { inlet, outlet };
+
+  for ( int i = 0; i < 2; ++i )
+  {
+    SMESH::SMESH_IDSource_ptr faceSource = faceSources[i];
+    if ( CORBA::is_nil( faceSource ))
+      THROW_SALOME_CORBA_EXCEPTION("Periodicity requires volumes, inlet and outlet",
+                                   SALOME::BAD_PARAM);
+
+    SMESH::SMESH_Mesh_var mesh = faceSource->GetMesh();
+    if (( !CORBA::is_nil( mesh ) && mesh->GetId() != myMesh_i->GetId() ) ||
+        ( CORBA::is_nil( mesh ) && !SMESH::DownCast<SMESH::Filter_i*>( faceSource )))
+      THROW_SALOME_CORBA_EXCEPTION("Wrong mesh of periodic IDSource", SALOME::BAD_PARAM);
+
+    prepareIdSource( faceSource );
+
+    SMESH::array_of_ElementType_var types = faceSource->GetTypes();
+    if ( types->length() != 1 || types[0] != SMESH::FACE )
+      THROW_SALOME_CORBA_EXCEPTION("Inlet and outlet must be FACE sources", SALOME::BAD_PARAM);
+
+    SMESH::smIdType_array_var ids = faceSource->GetIDs();
+    if ( ids->length() == 0 )
+      THROW_SALOME_CORBA_EXCEPTION("Inlet and outlet must not be empty", SALOME::BAD_PARAM);
+
+    for ( CORBA::ULong j = 0; j < ids->length(); ++j )
+    {
+      const SMDS_MeshElement* face = getMeshDS()->FindElement( ids[j] );
+      if ( !face || face->GetType() != SMDSAbs_Face )
+        THROW_SALOME_CORBA_EXCEPTION("Invalid face in inlet or outlet", SALOME::BAD_PARAM);
+
+      faces[i].insert( face );
+    }
+  }
+
+  getEditor().SplitVolumes( elemSet, int( methodFlags ), avoidOverConstrainedVolumes, true,
+                           faces[0], faces[1] );
+
+  declareMeshModified( /*isReComputeSafe=*/true ); // it does not influence Compute()
+
+  TPythonDump() << this << ".SplitVolumesIntoTetra( "
+                << elems << ", " << methodFlags << ", "
+                << avoidOverConstrainedVolumes << ", " << true << ", "
+                << inlet << ", " << outlet << " )";
+
+  SMESH_CATCH( SMESH::throwCorbaException );
+}
+
 //================================================================================
 /*!
  * \brief Split hexahedra into triangular prisms
@@ -2328,6 +2435,7 @@ void SMESH_MeshEditor_i::SplitVolumesIntoTetraAvoidOverConstrainedVolumes(SMESH:
  *         2 - split the hexahedron into 4 prisms
  */
 //================================================================================
+
 
 void SMESH_MeshEditor_i::SplitHexahedraIntoPrisms( SMESH::SMESH_IDSource_ptr  elems,
                                                    const SMESH::PointStruct & startHexPoint,

@@ -249,10 +249,17 @@ public:
    *        split into triangles
    *        if avoidOverConstrainedVolumes is True , the split method will choose the variant
    *        with no over-constrained volumes. 
+   *        If ensurePeriodicity is true, theInlet and theOutlet must be matching linear
+   *        boundary face sets of this mesh. Their translation is inferred with an
+   *        absolute node matching tolerance of 1e-7. Only HEXA_TO_5 and HEXA_TO_6 are supported;
+   *        a barycentric split is used when no standard variant meets the constraints.
    */
   void SplitVolumes (const TFacetOfElem & theElems,
                      const int theMethodFlags,
-                     const bool avoidOverConstrainedVolumes = false );
+                     const bool avoidOverConstrainedVolumes = false,
+                     const bool ensurePeriodicity = false,
+                     const TIDSortedElemSet& theInlet = TIDSortedElemSet(),
+                     const TIDSortedElemSet& theOutlet = TIDSortedElemSet() );
 
   /*!
    * \brief For hexahedra that will be split into prisms, finds facets to

@@ -5152,7 +5152,8 @@ class Mesh(metaclass = MeshMeta):
         """
         return self.editor.BestSplit(IDOfQuad, self.smeshpyD.GetFunctor(theCriterion))
 
-    def SplitVolumesIntoTetra(self, elems, method=smeshBuilder.Hex_5Tet, avoidOverConstrainedVolumes=False ):
+    def SplitVolumesIntoTetra(self, elems, method=smeshBuilder.Hex_5Tet, avoidOverConstrainedVolumes=False,
+                              ensurePeriodicity=False, inlet=None, outlet=None ):
         """
         Split volumic elements into tetrahedrons
 
@@ -5161,9 +5162,18 @@ class Mesh(metaclass = MeshMeta):
                 method:  flags passing splitting method:
                         smesh.Hex_5Tet, smesh.Hex_6Tet, smesh.Hex_24Tet.
                         smesh.Hex_5Tet - to split the hexahedron into 5 tetrahedrons, etc.
-                avoidOverConstrainedVolume: if True, choose variants that comply with no over-constrained volumes
+                avoidOverConstrainedVolumes: if True, choose variants that comply with no over-constrained volumes
+                ensurePeriodicity: if True, preserve periodicity by translation between inlet and outlet.
+                inlet: a nonempty FACE group, sub-mesh or filter of this mesh, required for periodicity.
+                outlet: a nonempty FACE group, sub-mesh or filter matching inlet by translation.
 
         Note:
+                Periodicity requires matching initial triangle/quadrangle surface meshes and linear
+                tetrahedrons, pyramids, prisms or hexahedrons. Only Hex_5Tet and Hex_6Tet are supported.
+                Apply this operation to all volumes sharing faces that will be split. A barycentric
+                split is used if no requested variant satisfies conformity and periodicity; a
+                hexahedron can then produce 12 tetrahedrons and one interior node.
+                Node matching uses a fixed absolute tolerance of 1e-7 in mesh units.
                 This operation can create gaps in numeration of elements.
                 Call :meth:`RenumberElements` to remove the gaps.
         """
@@ -5173,7 +5183,12 @@ class Mesh(metaclass = MeshMeta):
         if ( isinstance( elems, list )):
             elems = self.editor.MakeIDSource(elems, SMESH.VOLUME)
             unRegister.set( elems )
-        if avoidOverConstrainedVolumes:
+        if ensurePeriodicity:
+            if inlet is None or outlet is None:
+                raise ValueError("ensurePeriodicity requires inlet and outlet FACE sources")
+            self.editor.SplitVolumesIntoTetraWithPeriodicity(elems, method, inlet, outlet,
+                                                           avoidOverConstrainedVolumes)
+        elif avoidOverConstrainedVolumes:
             self.editor.SplitVolumesIntoTetraAvoidOverConstrainedVolumes(elems, method)
         else:
             self.editor.SplitVolumesIntoTetra(elems, method)

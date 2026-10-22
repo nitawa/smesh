@@ -468,6 +468,26 @@ module SMESH
       raises (SALOME::SALOME_Exception);
 
     /*!
+     * \brief Split volumic elements into tetrahedrons preserving periodicity
+     *  \param elems - elements to split
+     *  \param methodFlags - flags passing splitting method:
+     *         1 - split the hexahedron into 5 tetrahedrons
+     *         2 - split the hexahedron into 6 tetrahedrons
+     *         3 - split the hexahedron into 24 tetrahedrons
+     *  \param inlet - faces of the first periodic boundary
+     *  \param outlet - faces matching inlet by translation
+     *  \param avoidOverConstrainedVolumes - avoid creating over-constrained volumes
+     *  Linear volumes only. A barycentric split is used if necessary to preserve
+     *  conformity.
+     */
+    void SplitVolumesIntoTetraWithPeriodicity(in SMESH_IDSource elems,
+                                             in short methodFlags,
+                                             in SMESH_IDSource inlet,
+                                             in SMESH_IDSource outlet,
+                                             in boolean avoidOverConstrainedVolumes)
+      raises (SALOME::SALOME_Exception);
+
+    /*!
      * \brief Split hexahedra into triangular prisms
      *  \param elems - elements to split
      *  \param startHexPoint - a point used to find a hexahedron for which \a facetToSplitNormal

@@ -93,6 +93,7 @@
 #include <limits>
 #include <algorithm>
 #include <sstream>
+#include <string>
 
 #include <boost/tuple/tuple.hpp>
 #include <boost/container/flat_set.hpp>
@@ -2121,6 +2122,45 @@ namespace
     };
   const int* theHexTo2Prisms_FB[2] = { theHexTo2Prisms_FB_1, theHexTo2Prisms_FB_2 };
 
+  //=======================================================================
+  /*!
+   * \brief A key of a face of volume
+   */
+  //=======================================================================
+  struct TVolumeFaceKey: pair< pair< smIdType, smIdType>, pair< smIdType, smIdType> >
+  {
+    TVolumeFaceKey( SMDS_VolumeTool& vol, int iF )
+    {
+      TIDSortedNodeSet sortedNodes;
+      const int iQ = vol.Element()->IsQuadratic() ? 2 : 1;
+      int nbNodes = vol.NbFaceNodes( iF );
+      const SMDS_MeshNode** fNodes = vol.GetFaceNodes( iF );
+      for ( int i = 0; i < nbNodes; i += iQ )
+        sortedNodes.insert( fNodes[i] );
+      init( sortedNodes );
+    }
+    TVolumeFaceKey( const TIDSortedNodeSet& nodes )
+    {
+      init( nodes );
+    }
+    TVolumeFaceKey( const SMDS_MeshElement* face )
+    {
+      TIDSortedNodeSet sortedNodes;
+      for ( int i = 0; i < face->NbCornerNodes(); ++i )
+        sortedNodes.insert( face->GetNode( i ));
+      init( sortedNodes );
+    }
+    void init( const TIDSortedNodeSet& nodes )
+    {
+      TIDSortedNodeSet::const_iterator n = nodes.begin();
+      first.first   = (*(n++))->GetID();
+      first.second  = (*(n++))->GetID();
+      second.first  = (*(n++))->GetID();
+      second.second = ( nodes.size() > 3 ) ? (*(n++))->GetID() : 0;
+    }
+  };
+  typedef pair< smIdType, smIdType > TFaceDiagonal;
+  typedef map< TVolumeFaceKey, TFaceDiagonal > TPeriodicDiagonals;
 
   struct TTriangleFacet //!< stores indices of three nodes of tetra facet
   {
@@ -2223,7 +2263,8 @@ namespace
   //=======================================================================
   TSplitMethod getTetraSplitMethod( SMDS_VolumeTool& vol,
                                     const int theMethodFlags,
-                                    const bool avoidOverConstrainedVolumes )
+                                    const bool avoidOverConstrainedVolumes,
+                                    const TPeriodicDiagonals& periodicDiagonals )
   {
     const int iQ = vol.Element()->IsQuadratic() ? 2 : 1;
     // at HEXA_TO_24 method, each face of volume is split into triangles each based on
@@ -2248,6 +2289,26 @@ namespace
         TTriangleFacet t123( nInd[1*iQ], nInd[2*iQ], nInd[3*iQ] );
         if      ( t012.hasAdjacentVol( vol.Element() )) triaSplits.push_back( t012 );
         else if ( t123.hasAdjacentVol( vol.Element() )) triaSplits.push_back( t123 );
+        if ( !periodicDiagonals.empty() )
+        {
+          TPeriodicDiagonals::const_iterator constraint =
+            periodicDiagonals.find( TVolumeFaceKey( vol, iF ));
+          if ( constraint != periodicDiagonals.end() )
+          {
+            int iCommon = 0;
+            smIdType nodeID = vol.Element()->GetNode( nInd[0] )->GetID();
+            if ( nodeID != constraint->second.first && nodeID != constraint->second.second )
+              iCommon = 1;
+            TTriangleFacet facet( nInd[ iCommon ], nInd[ iCommon+1 ],
+                                  nInd[ iCommon+2 ] );
+            for ( const TTriangleFacet& adjacent : triaSplits )
+              if ( !adjacent.contains( nInd[ iCommon ]) ||
+                  !adjacent.contains( nInd[ iCommon+2 ]))
+                throw SALOME_Exception( "SplitVolumes: conflicting periodic and adjacent diagonals" );
+            if ( triaSplits.empty() )
+              triaSplits.push_back( facet );
+          }
+        }
       }
       else
       {
@@ -2585,27 +2646,278 @@ namespace
 
   //=======================================================================
   /*!
-   * \brief A key of a face of volume
+   * \brief Validate the periodic surfaces and prescribe matching diagonals.
+   *        All checks are made before modifying the mesh.
+   *
+   * The Inlet and the Outlet are two surfaces of the mesh.
+   * The Outlet is equal to the Inlet, with a translation.
+   * When the volumes are split into tetrahedra, each quadrangle is cut along one diagonal.
+   * This function gives the same diagonal to each quadrangle and to its translated quadrangle.
+   * Thus the Inlet and the Outlet stay equal, with a translation, after the split.
+   *
+   * The steps are:
+   * -# Examine the arguments.
+   * -# Examine the selected volumes.
+   * -# Examine the faces of the Inlet and of the Outlet.
+   * -# Calculate the translation from the Inlet to the Outlet.
+   * -# Find the Outlet node that agrees with each Inlet node.
+   * -# Find the Outlet face that agrees with each Inlet face.
+   * -# Select one diagonal for each pair of quadrangles.
+   *
+   * If a check fails, the function throws an exception. The mesh does not change.
+   *
+   * \param [in] editor - the mesh editor.
+   * \param [in] elems - the volumes to split.
+   * \param [in] inlet - the faces of the Inlet.
+   * \param [in] outlet - the faces of the Outlet.
+   * \param [in] methodFlags - the split method.
+   * \param [in] tolerance - the maximum distance between a translated Inlet node and its Outlet node.
+   * \param [out] diagonals - the diagonal to use for each periodic quadrangle.
    */
   //=======================================================================
 
-  struct TVolumeFaceKey: pair< pair< smIdType, smIdType>, pair< smIdType, smIdType> >
+  void getPeriodicDiagonals( SMESH_MeshEditor&                 editor,
+                            const SMESH_MeshEditor::TFacetOfElem& elems,
+                            const TIDSortedElemSet&           inlet,
+                            const TIDSortedElemSet&           outlet,
+                            const int                         methodFlags,
+                            const double                      tolerance,
+                            TPeriodicDiagonals&               diagonals )
   {
-    TVolumeFaceKey( SMDS_VolumeTool& vol, int iF )
+    // STEP 1: Examine the arguments.
+    // Periodicity is available only for the split of hexahedra into 5 or 6 tetrahedra.
+    if ( methodFlags != SMESH_MeshEditor::HEXA_TO_5 &&
+         methodFlags != SMESH_MeshEditor::HEXA_TO_6 )
+      throw SALOME_Exception( "SplitVolumes: periodicity requires Hex_5Tet or Hex_6Tet" );
+    if ( elems.empty() || inlet.empty() || outlet.empty() )
+      throw SALOME_Exception( "SplitVolumes: volumes, Inlet and Outlet must not be empty" );
+    // The Inlet and the Outlet must have the same number of faces.
+    if ( inlet.size() != outlet.size() )
+      throw SALOME_Exception( "SplitVolumes: Inlet and Outlet have different numbers of faces" );
+
+    // STEP 2: Examine the selected volumes.
+    // The split cuts each quadrangular face of a selected volume along a diagonal.
+    // If a volume that is not selected also uses this face, the mesh becomes non-conformal.
+    // Thus, all the volumes on the two sides of a quadrangular face must be selected.
+    SMDS_VolumeTool vol;
+    vector< const SMDS_MeshElement* > neighbours;
+    for ( const auto& elemFacet : elems )
     {
-      TIDSortedNodeSet sortedNodes;
-      const int iQ = vol.Element()->IsQuadratic() ? 2 : 1;
-      int nbNodes = vol.NbFaceNodes( iF );
-      const SMDS_MeshNode** fNodes = vol.GetFaceNodes( iF );
-      for ( int i = 0; i < nbNodes; i += iQ )
-        sortedNodes.insert( fNodes[i] );
-      TIDSortedNodeSet::iterator n = sortedNodes.begin();
-      first.first   = (*(n++))->GetID();
-      first.second  = (*(n++))->GetID();
-      second.first  = (*(n++))->GetID();
-      second.second = ( sortedNodes.size() > 3 ) ? (*(n++))->GetID() : 0;
+      const SMDS_MeshElement* elem = elemFacet.first;
+      // Make sure that the volume is in the mesh.
+      // Make sure that the volume is split into tetrahedra (no facet is given).
+      if ( !elem || editor.GetMeshDS()->FindElement( elem->GetID() ) != elem ||
+           elemFacet.second >= 0 )
+        throw SALOME_Exception( "SplitVolumes: invalid volume selection for periodicity" );
+      // Make sure that the volume type is linear and is supported.
+      switch ( elem->GetEntityType() )
+      {
+      case SMDSEntity_Tetra:
+      case SMDSEntity_Hexa:
+      case SMDSEntity_Penta:
+      case SMDSEntity_Pyramid:
+        break;
+      default:
+        throw SALOME_Exception( "SplitVolumes: periodicity supports only linear tetrahedra, "
+                                "hexahedra, prisms and pyramids" );
+      }
+      if ( !vol.Set( elem ))
+        throw SALOME_Exception( "SplitVolumes: invalid periodic volume" );
+      // Examine each quadrangular face of the volume.
+      for ( int iF = 0; iF < vol.NbFaces(); ++iF )
+      {
+        if ( vol.NbFaceNodes( iF ) != 4 ) continue;
+        // Find all the volumes that use the four nodes of the face.
+        const SMDS_MeshNode** nodes = vol.GetFaceNodes( iF );
+        vector< const SMDS_MeshNode* > faceNodes( nodes, nodes + 4 );
+        set< const SMDS_MeshNode* > faceNodeSet( nodes, nodes + 4 );
+        neighbours.clear();
+        SMDS_Mesh::GetElementsByNodes( faceNodes, neighbours, SMDSAbs_Volume );
+        // If one of these volumes is not selected and has this face, stop with an error.
+        for ( const SMDS_MeshElement* neighbour : neighbours )
+          if ( elems.find( neighbour ) == elems.end() &&
+               SMDS_VolumeTool( neighbour ).GetFaceIndex( faceNodeSet ) >= 0 )
+            throw SALOME_Exception( "SplitVolumes: periodic selection leaves an unsplit "
+                                    "volume across a quadrangular face" );
+      }
     }
-  };
+
+    // STEP 3: Examine the faces of the Inlet and of the Outlet.
+    // Index 0 is for the Inlet. Index 1 is for the Outlet.
+    // faces[] keeps the faces of each side. Each face is found with its set of nodes.
+    // nodes[] keeps all the nodes of each side.
+    typedef map< TVolumeFaceKey, const SMDS_MeshElement* > TFaceMap;
+    TFaceMap faces[2];
+    TIDSortedNodeSet nodes[2];
+    const TIDSortedElemSet* sides[] = { &inlet, &outlet };
+    for ( int iSide = 0; iSide < 2; ++iSide )
+      for ( const SMDS_MeshElement* face : *sides[ iSide ])
+      {
+        // Make sure that the face is in the mesh and is a linear triangle or quadrangle.
+        if ( !face || editor.GetMeshDS()->FindElement( face->GetID() ) != face ||
+             ( face->GetEntityType() != SMDSEntity_Triangle &&
+               face->GetEntityType() != SMDSEntity_Quadrangle ))
+          throw SALOME_Exception( "SplitVolumes: Inlet and Outlet must contain linear "
+                                  "triangles or quadrangles of this mesh" );
+        // Make sure that the face does not have the same node two times.
+        TIDSortedNodeSet faceNodes( face->begin_nodes(), face->end_nodes() );
+        if ( faceNodes.size() != size_t( face->NbNodes() ))
+          throw SALOME_Exception( "SplitVolumes: repeated node in a periodic face" );
+        // Keep the face. Make sure that the same side does not have this face two times.
+        if ( !faces[ iSide ].insert( make_pair( TVolumeFaceKey( faceNodes ), face )).second )
+          throw SALOME_Exception( "SplitVolumes: duplicate periodic face" );
+        // Make sure that an Outlet face is not also an Inlet face.
+        if ( iSide && faces[0].count( TVolumeFaceKey( faceNodes )))
+          throw SALOME_Exception( "SplitVolumes: Inlet and Outlet must be distinct surfaces" );
+        // Keep the nodes of the face.
+        nodes[ iSide ].insert( faceNodes.begin(), faceNodes.end() );
+
+        // Each periodic face must be on the boundary of one selected volume.
+        // Find all the volumes that use the nodes of the face.
+        vector< const SMDS_MeshNode* > faceNodeVec( face->begin_nodes(), face->end_nodes() );
+        set< const SMDS_MeshNode* > faceNodeSet( face->begin_nodes(), face->end_nodes() );
+        neighbours.clear();
+        SMDS_Mesh::GetElementsByNodes( faceNodeVec, neighbours, SMDSAbs_Volume );
+        // Count the volumes that have this face (the owners).
+        int nbOwners = 0;
+        for ( const SMDS_MeshElement* neighbour : neighbours )
+        {
+          SMDS_VolumeTool owner( neighbour );
+          int iF = owner.GetFaceIndex( faceNodeSet );
+          if ( iF < 0 ) continue;
+          ++nbOwners;
+          // Make sure that the owner is selected and that the face is on the mesh boundary.
+          if ( elems.find( neighbour ) == elems.end() || !owner.IsFreeFace( iF ))
+            throw SALOME_Exception( "SplitVolumes: a periodic face is not on the "
+                                    "boundary of the selected volumes" );
+          // Compare the node order of the face with the node order of the owner face.
+          // Start at the same node. Then go forward and backward around the face.
+          // The two orders must be the same, or one order must be the reverse of the other.
+          const SMDS_MeshNode** ownerNodes = owner.GetFaceNodes( iF );
+          const int nbNodes = face->NbNodes();
+          const int start = face->GetNodeIndex( ownerNodes[0] );
+          bool forward = true, backward = true;
+          for ( int i = 1; i < nbNodes; ++i )
+          {
+            forward  = forward  && ownerNodes[i] == face->GetNode(( start+i ) % nbNodes );
+            backward = backward && ownerNodes[i] == face->GetNode(( start-i+nbNodes ) % nbNodes );
+          }
+          if ( !forward && !backward )
+            throw SALOME_Exception( "SplitVolumes: a periodic face has incompatible volume connectivity" );
+          // A quadrangle has two triangles for each diagonal.
+          // If a tetrahedron is already adjacent to one of these triangles, stop with an error.
+          // Then the diagonal of the quadrangle is already set, and we cannot select it.
+          if ( face->NbNodes() == 4 )
+          {
+            const int* nInd = owner.GetFaceNodesIndices( iF );
+            if ( TTriangleFacet( nInd[0], nInd[1], nInd[2] ).hasAdjacentVol( neighbour ) ||
+                 TTriangleFacet( nInd[1], nInd[2], nInd[3] ).hasAdjacentVol( neighbour ))
+              throw SALOME_Exception( "SplitVolumes: a periodic quadrangle already "
+                                      "has adjacent tetrahedra" );
+          }
+        }
+        // Make sure that the face has one owner only.
+        if ( nbOwners != 1 )
+          throw SALOME_Exception( "SplitVolumes: each periodic face must have one selected owner" );
+      }
+
+    // The Inlet and the Outlet must have the same number of nodes.
+    if ( nodes[0].size() != nodes[1].size() )
+      throw SALOME_Exception( "SplitVolumes: Inlet and Outlet have different numbers of nodes" );
+
+    // STEP 4: Calculate the translation from the Inlet to the Outlet.
+    // The translation is the vector from the Inlet centre to the Outlet centre.
+    // The centre of a side is the mean position of all its nodes.
+    // Calculate the mean relative to one node of the side.
+    // This prevents the loss of precision when the coordinates are large.
+    gp_XYZ centres[2];
+    for ( int iSide = 0; iSide < 2; ++iSide )
+    {
+      const gp_XYZ origin = SMESH_NodeXYZ( *nodes[ iSide ].begin() );
+      gp_XYZ sum( 0., 0., 0. );
+      for ( const SMDS_MeshNode* node : nodes[ iSide ])
+        sum += SMESH_NodeXYZ( node ) - origin;
+      centres[ iSide ] = origin + sum / double( nodes[ iSide ].size() );
+    }
+    const gp_XYZ translation = centres[1] - centres[0];
+
+    // STEP 5: Find the Outlet node that agrees with each Inlet node.
+    // Put the Outlet nodes in an octree to find them quickly.
+    // nodeMap keeps the Outlet node of each Inlet node.
+    SMESH_OctreeNode searcher( nodes[1] );
+    map< const SMDS_MeshNode*, const SMDS_MeshNode* > nodeMap;
+    TIDSortedNodeSet matchedNodes;
+    vector< const SMDS_MeshNode* > candidates;
+    for ( const SMDS_MeshNode* node : nodes[0] )
+    {
+      // Move the Inlet node with the translation.
+      // Find the Outlet nodes near this position (distance less than the tolerance).
+      candidates.clear();
+      searcher.NodesAround( SMESH_NodeXYZ( node ) + translation, candidates, tolerance );
+      // There must be one Outlet node only.
+      // This Outlet node must not agree with a different Inlet node.
+      if ( candidates.size() != 1 || !matchedNodes.insert( candidates[0] ).second )
+        throw SALOME_Exception( "SplitVolumes: missing or ambiguous translated node on Outlet" );
+      nodeMap.insert( make_pair( node, candidates[0] ));
+    }
+
+    // STEP 6: Find the Outlet face that agrees with each Inlet face.
+    // facePairs keeps each Inlet face with its Outlet face.
+    vector< pair< const SMDS_MeshElement*, const SMDS_MeshElement* > > facePairs;
+    TIDSortedElemSet matchedFaces;
+    for ( const SMDS_MeshElement* face : inlet )
+    {
+      // Get the Outlet nodes of the Inlet face nodes.
+      TIDSortedNodeSet translatedNodes;
+      for ( int i = 0; i < face->NbNodes(); ++i )
+        translatedNodes.insert( nodeMap.find( face->GetNode(i) )->second );
+      // Find the Outlet face with these nodes.
+      // This Outlet face must not agree with a different Inlet face.
+      TFaceMap::const_iterator match = faces[1].find( TVolumeFaceKey( translatedNodes ));
+      if ( match == faces[1].end() || !matchedFaces.insert( match->second ).second )
+        throw SALOME_Exception( "SplitVolumes: periodic face connectivities do not match" );
+      // Compare the node order of the Inlet face with the node order of the Outlet face.
+      // The two orders must be the same, or one order must be the reverse of the other.
+      const SMDS_MeshElement* other = match->second;
+      const int nbNodes = face->NbNodes();
+      int start = other->GetNodeIndex( nodeMap.find( face->GetNode(0) )->second );
+      bool forward = true, backward = true;
+      for ( int i = 1; i < nbNodes; ++i )
+      {
+        const SMDS_MeshNode* node = nodeMap.find( face->GetNode(i) )->second;
+        forward  = forward  && node == other->GetNode(( start+i ) % nbNodes );
+        backward = backward && node == other->GetNode(( start-i+nbNodes ) % nbNodes );
+      }
+      if ( !forward && !backward )
+        throw SALOME_Exception( "SplitVolumes: periodic faces have incompatible node ordering" );
+      facePairs.push_back( make_pair( face, other ));
+    }
+
+    // STEP 7: Select one diagonal for each pair of quadrangles.
+    // BestSplit() clears the creation history of the editor.
+    // Thus, call BestSplit() only after all the checks.
+    SMESH::Controls::NumericalFunctorPtr aspectRatio( new SMESH::Controls::AspectRatio );
+    for ( const auto& facePair : facePairs )
+    {
+      // A triangle does not have a diagonal.
+      const SMDS_MeshElement* face = facePair.first;
+      if ( face->NbNodes() == 3 ) continue;
+      // Select the diagonal that gives the best aspect ratio on the Inlet quadrangle.
+      // BestSplit() gives 1 for the diagonal 1-3, and 2 for the diagonal 2-4.
+      // Thus, i is the index (from 0) of the first node of the diagonal.
+      const int i = editor.BestSplit( face, aspectRatio ) - 1;
+      const SMDS_MeshNode* n1 = face->GetNode( i );
+      const SMDS_MeshNode* n2 = face->GetNode( i+2 );
+      // Keep this diagonal for the Inlet quadrangle.
+      // Keep the translated diagonal for the Outlet quadrangle.
+      diagonals.insert( make_pair( TVolumeFaceKey( face ),
+                                  TFaceDiagonal( n1->GetID(), n2->GetID() )));
+      diagonals.insert( make_pair( TVolumeFaceKey( facePair.second ),
+                                  TFaceDiagonal( nodeMap.find(n1)->second->GetID(),
+                                                 nodeMap.find(n2)->second->GetID() )));
+    }
+  }
+
 } // namespace
 
 //=======================================================================
@@ -2619,8 +2931,17 @@ namespace
 
 void SMESH_MeshEditor::SplitVolumes (const TFacetOfElem & theElems,
                                      const int            theMethodFlags,
-                                     const bool avoidOverConstrainedVolumes )
+                                     const bool avoidOverConstrainedVolumes,
+                                     const bool ensurePeriodicity,
+                                     const TIDSortedElemSet& theInlet,
+                                     const TIDSortedElemSet& theOutlet )
 {
+  const double periodicTolerance = 1e-7;
+  TPeriodicDiagonals periodicDiagonals;
+  if ( ensurePeriodicity )
+    getPeriodicDiagonals( *this, theElems, theInlet, theOutlet,
+                         theMethodFlags, periodicTolerance, periodicDiagonals );
+
   SMDS_VolumeTool    volTool;
   SMESH_MesherHelper helper( *GetMesh()), fHelper(*GetMesh());
   fHelper.ToFixNodeParameters( true );
@@ -2649,7 +2970,8 @@ void SMESH_MeshEditor::SplitVolumes (const TFacetOfElem & theElems,
     if ( !volTool.Set( elem, /*ignoreCentralNodes=*/false )) continue; // strange...
 
     TSplitMethod splitMethod = ( facetToSplit < 0  ?
-                                 getTetraSplitMethod( volTool, theMethodFlags, avoidOverConstrainedVolumes) :
+                                 getTetraSplitMethod( volTool, theMethodFlags,
+                                                      avoidOverConstrainedVolumes, periodicDiagonals ) :
                                  getPrismSplitMethod( volTool, theMethodFlags, facetToSplit ));
     if ( splitMethod._nbSplits < 1 ) continue;
 
