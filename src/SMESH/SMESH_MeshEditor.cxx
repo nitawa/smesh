@@ -2649,7 +2649,7 @@ namespace
    *        All checks are made before modifying the mesh.
    *
    * The Inlet and the Outlet are two surfaces of the mesh.
-   * The Outlet is equal to the Inlet, with a translation.
+   * The Outlet is equal to the Inlet, up to a translation.
    * When the volumes are split into tetrahedra, each quadrangle is cut along one diagonal.
    * This function gives the same diagonal to each quadrangle and to its translated quadrangle.
    * Thus the Inlet and the Outlet stay equal, with a translation, after the split.
@@ -2669,24 +2669,17 @@ namespace
    * \param [in] elems - the volumes to split.
    * \param [in] inlet - the faces of the Inlet.
    * \param [in] outlet - the faces of the Outlet.
-   * \param [in] methodFlags - the split method.
-   * \param [out] diagonals - the diagonal to use for each periodic quadrangle.
+   * \return the diagonal to use for each periodic quadrangle.
    */
   //=======================================================================
 
-  void getPeriodicDiagonals( const SMESHDS_Mesh*               meshDS,
-                            const SMESH_MeshEditor::TFacetOfElem& elems,
-                            const TIDSortedElemSet&           inlet,
-                            const TIDSortedElemSet&           outlet,
-                            const int                         methodFlags,
-                            TPeriodicDiagonals&               diagonals )
+  TPeriodicDiagonals getPeriodicDiagonals( const SMESHDS_Mesh*                   meshDS,
+                                           const SMESH_MeshEditor::TFacetOfElem& elems,
+                                           const TIDSortedElemSet&               inlet,
+                                           const TIDSortedElemSet&               outlet )
   {
     const double aTol = Precision::Confusion();
     // STEP 1: Examine the arguments.
-    // Periodicity is available only for the split of hexahedra into 5 or 6 tetrahedra.
-    if ( methodFlags != SMESH_MeshEditor::HEXA_TO_5 &&
-         methodFlags != SMESH_MeshEditor::HEXA_TO_6 )
-      throw SALOME_Exception( "SplitVolumes: periodicity requires Hex_5Tet or Hex_6Tet" );
     if ( elems.empty() || inlet.empty() || outlet.empty() )
       throw SALOME_Exception( "SplitVolumes: volumes, Inlet and Outlet must not be empty" );
     // The Inlet and the Outlet must have the same number of faces.
@@ -2695,8 +2688,7 @@ namespace
 
     // STEP 2: Examine the selected volumes.
     // The split cuts each quadrangular face of a selected volume along a diagonal.
-    // If a volume that is not selected also uses this face, the mesh becomes non-conformal.
-    // Thus, all the volumes on the two sides of a quadrangular face must be selected.
+    // Select All the volumes on sides of quadrangular faces to keep the mesh conformal.
     SMDS_VolumeTool vol;
     vector< const SMDS_MeshElement* > neighbours;
     for ( const auto& elemFacet : elems )
@@ -2879,6 +2871,7 @@ namespace
     // Select the diagonal that gives the best aspect ratio on the Inlet quadrangle,
     // like SMESH_MeshEditor::BestSplit() does.
     SMESH::Controls::NumericalFunctorPtr aspectRatio( new SMESH::Controls::AspectRatio );
+    TPeriodicDiagonals diagonals;
     for ( const auto& facePair : facePairs )
     {
       // A triangle does not have a diagonal.
@@ -2896,6 +2889,7 @@ namespace
       diagonals.insert( SMESH_TLink( nodeMap.find( n[i]   )->second,
                                      nodeMap.find( n[i+2] )->second ));
     }
+    return diagonals;
   }
 
 } // namespace
@@ -2907,6 +2901,7 @@ namespace
 //           else a hexahedron is split into prisms so that the given facet is
 //           split into triangles
 //           Avoid over-constrained volumes if true (only for tetras)
+//           Ensure periodicity between given faces if ensurePeriodicity is true
 //=======================================================================
 
 void SMESH_MeshEditor::SplitVolumes (const TFacetOfElem & theElems,
@@ -2916,10 +2911,17 @@ void SMESH_MeshEditor::SplitVolumes (const TFacetOfElem & theElems,
                                      const TIDSortedElemSet& theInlet,
                                      const TIDSortedElemSet& theOutlet )
 {
+  // Despite its name, HEXA_TO_24 applies to all volume types (hexahedra, prisms, pyramids):
+  // each quadrangle is cut with a barycentric node, not along a diagonal.
+  // Thus the normal split already keeps the periodicity.
+  if ( ensurePeriodicity &&
+       theMethodFlags != HEXA_TO_5 &&
+       theMethodFlags != HEXA_TO_6 &&
+       theMethodFlags != HEXA_TO_24 )
+    throw SALOME_Exception( "SplitVolumes: periodicity requires Hex_5Tet, Hex_6Tet or Hex_24Tet" );
   TPeriodicDiagonals periodicDiagonals;
-  if ( ensurePeriodicity )
-    getPeriodicDiagonals( GetMeshDS(), theElems, theInlet, theOutlet,
-                         theMethodFlags, periodicDiagonals );
+  if ( ensurePeriodicity && theMethodFlags != HEXA_TO_24 )
+    periodicDiagonals = getPeriodicDiagonals( GetMeshDS(), theElems, theInlet, theOutlet );
 
   SMDS_VolumeTool    volTool;
   SMESH_MesherHelper helper( *GetMesh()), fHelper(*GetMesh());

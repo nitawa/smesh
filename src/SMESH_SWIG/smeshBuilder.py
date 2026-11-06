@@ -5169,10 +5169,11 @@ class Mesh(metaclass = MeshMeta):
 
         Note:
                 Periodicity requires matching initial triangle/quadrangle surface meshes and linear
-                tetrahedrons, pyramids, prisms or hexahedrons. Only Hex_5Tet and Hex_6Tet are supported.
+                tetrahedrons, pyramids, prisms or hexahedrons with Hex_5Tet and Hex_6Tet.
                 Apply this operation to all volumes sharing faces that will be split. A barycentric
                 split is used if no requested variant satisfies conformity and periodicity; a
                 hexahedron can then produce 12 tetrahedrons and one interior node.
+                Hex_24Tet always preserves periodicity: the normal split is used.
                 Node matching uses a fixed absolute tolerance of 1e-7 in mesh units.
                 This operation can create gaps in numeration of elements.
                 Call :meth:`RenumberElements` to remove the gaps.
