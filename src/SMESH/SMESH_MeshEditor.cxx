@@ -2262,14 +2262,10 @@ namespace
           else if ( periodicDiagonals.count( SMESH_TLink( fNodes[1], fNodes[3] ))) iCommon = 1;
           if ( iCommon >= 0 )
           {
-            TTriangleFacet facet( nInd[ iCommon ], nInd[ iCommon+1 ],
-                                  nInd[ iCommon+2 ] );
-            for ( const TTriangleFacet& adjacent : triaSplits )
-              if ( !adjacent.contains( nInd[ iCommon ]) ||
-                  !adjacent.contains( nInd[ iCommon+2 ]))
-                throw SALOME_Exception( "SplitVolumes: conflicting periodic and adjacent diagonals" );
-            if ( triaSplits.empty() )
-              triaSplits.push_back( facet );
+            // getPeriodicDiagonals() (STEP 3) checked that no tetrahedron is adjacent to this quadrangle
+            ASSERT( triaSplits.empty() );
+            triaSplits.push_back( TTriangleFacet( nInd[ iCommon ], nInd[ iCommon+1 ],
+                                                  nInd[ iCommon+2 ] ));
           }
         }
       }
