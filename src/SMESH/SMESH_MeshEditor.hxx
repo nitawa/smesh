@@ -39,6 +39,7 @@
 
 #include <TColStd_HSequenceOfReal.hxx>
 #include <gp_Dir.hxx>
+#include <Precision.hxx>
 
 #include <list>
 #include <map>
@@ -251,13 +252,15 @@ public:
    *        with no over-constrained volumes. 
    *        If ensurePeriodicity is true, the method makes the two periodic faces
    *        identical, up to a translation. The input faces must already be periodic.
+   *        theTolerance is the absolute distance used to match translated nodes for periodicity.
    */
   void SplitVolumes (const TFacetOfElem & theElems,
                      const int theMethodFlags,
                      const bool avoidOverConstrainedVolumes = false,
                      const bool ensurePeriodicity = false,
                      const TIDSortedElemSet& theInlet = TIDSortedElemSet(),
-                     const TIDSortedElemSet& theOutlet = TIDSortedElemSet() );
+                     const TIDSortedElemSet& theOutlet = TIDSortedElemSet(),
+                     const double periodicTolerance = Precision::Confusion() );
 
   /*!
    * \brief For hexahedra that will be split into prisms, finds facets to

@@ -5153,7 +5153,7 @@ class Mesh(metaclass = MeshMeta):
         return self.editor.BestSplit(IDOfQuad, self.smeshpyD.GetFunctor(theCriterion))
 
     def SplitVolumesIntoTetra(self, elems, method=smeshBuilder.Hex_5Tet, avoidOverConstrainedVolumes=False,
-                              ensurePeriodicity=False, inlet=None, outlet=None ):
+                              ensurePeriodicity=False, inlet=None, outlet=None, tolerance=1e-7 ):
         """
         Split volumic elements into tetrahedrons
 
@@ -5166,6 +5166,8 @@ class Mesh(metaclass = MeshMeta):
                 ensurePeriodicity: if True, preserve periodicity by translation between inlet and outlet.
                 inlet: a nonempty FACE group, sub-mesh or filter of this mesh, required for periodicity.
                 outlet: a nonempty FACE group, sub-mesh or filter matching inlet by translation.
+                tolerance: used to match periodic nodes. Used only if ensurePeriodicity is True.
+                        The default 1e-7 is the OCCT confusion precision.
 
         Note:
                 Periodicity requires matching initial triangle/quadrangle surface meshes and linear
@@ -5173,8 +5175,8 @@ class Mesh(metaclass = MeshMeta):
                 Apply this operation to all volumes sharing faces that will be split. A barycentric
                 split is used if no requested variant satisfies conformity and periodicity; a
                 hexahedron can then produce 12 tetrahedrons and one interior node.
-                Hex_24Tet always preserves periodicity: the normal split is used.
-                Node matching uses a fixed absolute tolerance of 1e-7 in mesh units.
+                Hex_24Tet always preserves periodicity: the normal split is used, and
+                inlet, outlet and tolerance are not checked.
                 This operation can create gaps in numeration of elements.
                 Call :meth:`RenumberElements` to remove the gaps.
         """
@@ -5188,7 +5190,8 @@ class Mesh(metaclass = MeshMeta):
             if inlet is None or outlet is None:
                 raise ValueError("ensurePeriodicity requires inlet and outlet FACE sources")
             self.editor.SplitVolumesIntoTetraWithPeriodicity(elems, method, inlet, outlet,
-                                                           avoidOverConstrainedVolumes)
+                                                           avoidOverConstrainedVolumes,
+                                                           tolerance)
         elif avoidOverConstrainedVolumes:
             self.editor.SplitVolumesIntoTetraAvoidOverConstrainedVolumes(elems, method)
         else:

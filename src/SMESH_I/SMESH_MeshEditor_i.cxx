@@ -2327,7 +2327,8 @@ void SMESH_MeshEditor_i::SplitVolumesIntoTetraWithPeriodicity(SMESH::SMESH_IDSou
                                                               CORBA::Short              methodFlags,
                                                               SMESH::SMESH_IDSource_ptr inlet,
                                                               SMESH::SMESH_IDSource_ptr outlet,
-                                                              CORBA::Boolean           avoidOverConstrainedVolumes)
+                                                              CORBA::Boolean           avoidOverConstrainedVolumes,
+                                                              CORBA::Double            tolerance)
 {
   SMESH_TRY;
   initData();
@@ -2355,14 +2356,14 @@ void SMESH_MeshEditor_i::SplitVolumesIntoTetraWithPeriodicity(SMESH::SMESH_IDSou
   }
 
   getEditor().SplitVolumes( elemSet, int( methodFlags ), avoidOverConstrainedVolumes, true,
-                           faces[0], faces[1] );
+                           faces[0], faces[1], tolerance );
 
   declareMeshModified( /*isReComputeSafe=*/true ); // it does not influence Compute()
 
   TPythonDump() << this << ".SplitVolumesIntoTetra( "
                 << elems << ", " << methodFlags << ", "
                 << avoidOverConstrainedVolumes << ", " << true << ", "
-                << inlet << ", " << outlet << " )";
+                << inlet << ", " << outlet << ", " << tolerance << " )";
 
   SMESH_CATCH( SMESH::throwCorbaException );
 }

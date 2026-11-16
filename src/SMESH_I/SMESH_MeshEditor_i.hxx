@@ -267,7 +267,8 @@ public:
                                                       CORBA::Short             methodFlags,
                                                       SMESH::SMESH_IDSource_ptr inlet,
                                                       SMESH::SMESH_IDSource_ptr outlet,
-                                                      CORBA::Boolean           avoidOverConstrainedVolumes);
+                                                      CORBA::Boolean           avoidOverConstrainedVolumes,
+                                                      CORBA::Double            tolerance);
   void           SplitVolumesIntoTetraAvoidOverConstrainedVolumes(SMESH::SMESH_IDSource_ptr elems,
                                                                   CORBA::Short              methodFlags);
   void           SplitHexahedraIntoPrisms(SMESH::SMESH_IDSource_ptr  elems,

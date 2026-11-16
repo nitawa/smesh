@@ -7,240 +7,197 @@ Fonctions liées :
 
 | Fonction | Rôle |
 |---|---|
-| `SMESH_MeshEditor::SplitVolumes(...)` | Point d'entrée. Appelle `getPeriodicDiagonals` une seule fois, avant toute modification, si `ensurePeriodicity` est vrai. |
-| `getPeriodicDiagonals(...)` | Valide les entrées et calcule une diagonale imposée pour chaque quadrangle inlet/outlet. |
+| `SMESH_MeshEditor::SplitVolumes(...)` | Point d'entrée. Vérifie la méthode. Si `ensurePeriodicity` est vrai et que la méthode est `HEXA_TO_5` ou `HEXA_TO_6`, appelle `getPeriodicDiagonals` une seule fois, avant toute modification du maillage. |
+| `getPeriodicDiagonals(...)` | Valide les entrées et calcule une diagonale imposée pour chaque quadrangle inlet/outlet. Ne modifie ni le maillage ni l'éditeur. |
+| `isQuadDiagonal(...)` | Indique si deux nœuds sont les coins opposés d'un quadrangle donné par ses 4 nœuds. |
 | `getTetraSplitMethod(...)` | Pour chaque volume, choisit le découpage en tétraèdres en respectant les diagonales imposées. |
-| `TVolumeFaceKey` | Clé d'identification d'une face par l'ensemble trié de ses nœuds (indépendante de l'orientation et du point de départ). |
+| `TPeriodicDiagonals` | `std::set< SMESH_TLink >` : ensemble des diagonales imposées. |
+
+Couches d'interface :
+
+| Couche | Point d'entrée |
+|---|---|
+| IDL (`idl/SMESH_MeshEditor.idl`) | `SplitVolumesIntoTetraWithPeriodicity( elems, methodFlags, inlet, outlet, avoidOverConstrainedVolumes )` |
+| CORBA (`src/SMESH_I/SMESH_MeshEditor_i.cxx`) | Convertit `elems` en volumes (facette `-1`) et `inlet`/`outlet` en `TIDSortedElemSet` de faces, puis appelle `SplitVolumes( ..., ensurePeriodicity = true, ... )`. |
+| Python (`src/SMESH_SWIG/smeshBuilder.py`) | `Mesh.SplitVolumesIntoTetra( elems, method, avoidOverConstrainedVolumes, ensurePeriodicity=False, inlet=None, outlet=None )` |
 
 ---
 
-## 1. Résumé
+## 1. Principe
 
-La fonctionnalité « Split Volumes avec périodicité » découpe des volumes linéaires
-(hexaèdres, prismes, pyramides, tétraèdres) en tétraèdres. Elle garantit en plus
-que deux surfaces du maillage, **Inlet** et **Outlet**, restent identiques à une
-translation près **après** le découpage, comme elles l'étaient **avant**.
+La fonctionnalité découpe des volumes linéaires (hexaèdres, prismes, pyramides)
+en tétraèdres. Elle garantit en plus que deux surfaces du maillage, **Inlet** et
+**Outlet**, identiques à une translation près avant le découpage, le restent
+après.
 
-La seule chose qui peut casser cette périodicité est le choix des diagonales.
-Un quadrangle se coupe en deux triangles de deux façons : par la diagonale 0-2
-ou par la diagonale 1-3. Les triangles d'origine restent des triangles. Si un
-quadrangle de l'inlet est coupé par une diagonale et que son image sur l'outlet
-est coupée par l'autre, les deux surfaces ne se correspondent plus.
+Seul le choix des diagonales peut casser cette périodicité. Un quadrangle se
+coupe en deux triangles par la diagonale 0-2 ou par la diagonale 1-3 (les
+triangles ne sont pas modifiés). Si un quadrangle de l'inlet et son image sur
+l'outlet sont coupés par des diagonales différentes, les deux surfaces ne se
+correspondent plus.
 
-`getPeriodicDiagonals` règle ce problème **en amont** du découpage. Elle :
+- **`HEXA_TO_24`** : chaque quadrangle est coupé en 4 triangles autour du centre
+  de la face, sans diagonale. Le découpage normal conserve donc la périodicité.
+  `getPeriodicDiagonals` n'est pas appelée, et le noyau C++ ne vérifie pas
+  l'inlet et l'outlet.
+- **`HEXA_TO_5` et `HEXA_TO_6`** : `getPeriodicDiagonals` valide les données,
+  apparie l'inlet et l'outlet, puis choisit une diagonale pour chaque
+  quadrangle de l'inlet et impose son image au quadrangle correspondant de
+  l'outlet. Toutes les erreurs sont levées (`SALOME_Exception`) avant de
+  modifier le maillage.
 
-1. **vérifie** que les données permettent un découpage périodique : méthode,
-   types d'éléments, faces au bord, nombre de faces et de nœuds identiques, etc.
-   Toutes les vérifications ont lieu avant de modifier le maillage. En cas
-   d'erreur, une `SALOME_Exception` est levée et le maillage reste intact ;
-2. **déduit la translation** inlet → outlet à partir des barycentres des nœuds
-   des deux surfaces ;
-3. **apparie** chaque nœud de l'inlet à un nœud de l'outlet (recherche par
-   octree à la tolérance `1e-7`), puis chaque face de l'inlet à une face de
-   l'outlet ;
-4. **choisit une diagonale** pour chaque quadrangle de l'inlet (critère de
-   qualité `AspectRatio` via `BestSplit`) et **reporte son image** sur le
-   quadrangle correspondant de l'outlet.
-
-Le résultat est une table `TPeriodicDiagonals` : clé de face → paire d'IDs de
-nœuds de la diagonale imposée. Elle est ensuite passée à `getTetraSplitMethod`,
-qui l'ajoute aux contraintes déjà présentes (diagonales imposées par les
-tétraèdres voisins). Le découpage standard (variantes `Hex_5Tet`/`Hex_6Tet`) est
-alors choisi pour respecter toutes ces contraintes. Si aucune variante ne
-convient, on passe au découpage barycentrique, qui respecte lui aussi la
-diagonale imposée.
-
-Les faces 2D inlet/outlet sont ensuite remplacées par leurs triangles à la fin
-de `SplitVolumes`, avec `ReplaceElemInGroups`. Les groupes Inlet/Outlet
-contiennent donc des triangles qui se correspondent par translation.
+Les diagonales sont ensuite passées à `getTetraSplitMethod`, qui choisit pour
+chaque volume un découpage qui les respecte (voir section 4).
 
 ---
 
-## 2. Signature et sorties
+## 2. Signature
 
 ```cpp
-void getPeriodicDiagonals( SMESH_MeshEditor&                     editor,
-                           const SMESH_MeshEditor::TFacetOfElem& elems,
-                           const TIDSortedElemSet&               inlet,
-                           const TIDSortedElemSet&               outlet,
-                           const int                             methodFlags,
-                           const double                          tolerance,
-                           TPeriodicDiagonals&                   diagonals );
+typedef std::set< SMESH_TLink > TPeriodicDiagonals;
+
+TPeriodicDiagonals getPeriodicDiagonals( const SMESHDS_Mesh*                   meshDS,
+                                         const SMESH_MeshEditor::TFacetOfElem& elems,
+                                         const TIDSortedElemSet&               inlet,
+                                         const TIDSortedElemSet&               outlet );
 ```
 
+- `meshDS` : le maillage. Il sert seulement à vérifier que les éléments en font partie.
 - `elems` : volumes à découper (map volume → index de facette ; `-1` = découpage en tétraèdres).
 - `inlet`, `outlet` : faces 2D (triangles/quadrangles linéaires) des deux surfaces périodiques.
-- `methodFlags` : `HEXA_TO_5` ou `HEXA_TO_6` uniquement.
-- `tolerance` : tolérance **absolue** d'appariement des nœuds (fixée à `1e-7` dans `SplitVolumes`).
-- `diagonals` (sortie) :
+- Valeur de retour : deux diagonales par paire de quadrangles appariés, une
+  pour l'inlet et une pour l'outlet. Les triangles n'en ont pas.
 
-```cpp
-typedef pair< smIdType, smIdType >           TFaceDiagonal;      // IDs des 2 nœuds de la diagonale
-typedef map< TVolumeFaceKey, TFaceDiagonal > TPeriodicDiagonals; // face -> diagonale imposée
-```
+La tolérance d'appariement des nœuds est réglée sur `Precision::Confusion()` (`1e-7`, la précision d'OCC pour les superpositions).
 
-Seuls les quadrangles ont une entrée (un triangle n'a rien à choisir). Pour
-chaque paire de faces appariées, il y a **deux** entrées : une pour la face
-inlet, une pour la face outlet.
-
-`TVolumeFaceKey` construit la clé à partir des IDs triés des nœuds de coin.
-On obtient donc la même clé à partir d'un `SMDS_MeshElement` face, d'un
-`TIDSortedNodeSet` ou d'une face de volume (`SMDS_VolumeTool`, indice `iF`).
-C'est ce qui permet à `getTetraSplitMethod` de retrouver la contrainte en
-partant de la face du volume.
+`SMESH_TLink` est une paire de nœuds triée : le sens de la diagonale ne compte
+pas. Une diagonale suffit à identifier son quadrangle, il n'y a donc pas de clé
+de face.
 
 ---
 
-## 3. Détail de l'algorithme
+## 3. Algorithme
 
-### Étape 0 — Préconditions globales
+Les étapes suivent les commentaires `STEP n` du code.
 
-- `methodFlags` doit valoir `HEXA_TO_5` ou `HEXA_TO_6`. `HEXA_TO_24` découpe
-  chaque face autour de son barycentre et n'a pas de diagonale à choisir. Il
-  n'est pas pris en charge ici.
-- `elems`, `inlet` et `outlet` ne doivent pas être vides.
+### Étape 1 — Arguments
+
+- `elems`, `inlet` et `outlet` ne sont pas vides.
 - `inlet.size() == outlet.size()`.
 
-### Étape 1 — Validation des volumes sélectionnés
+### Étape 2 — Volumes sélectionnés
 
 Pour chaque volume de `elems` :
 
-1. Il doit exister dans le maillage (`FindElement(id) == elem`) et être marqué
-   pour un découpage en tétraèdres (`elemFacet.second < 0`). Un découpage en
-   prismes est refusé.
-2. Son type doit être linéaire : `Tetra`, `Hexa`, `Penta` ou `Pyramid`. Les
-   éléments quadratiques et les polyèdres sont refusés.
-3. `SMDS_VolumeTool::Set` doit réussir.
-4. **Conformité** : pour chaque face quadrangulaire du volume, on cherche les
-   autres volumes qui partagent cette face (`GetElementsByNodes` +
-   `GetFaceIndex`). Si l'un d'eux **n'est pas** dans la sélection, on lève une
-   erreur. Sinon, le découpage introduirait une diagonale sur une face partagée
-   avec un volume non découpé, et le maillage deviendrait non conforme.
+1. Il appartient au maillage et doit être découpé en tétraèdres
+   (`elemFacet.second < 0`), pas en prismes.
+2. Son type est `Tetra`, `Hexa`, `Penta` ou `Pyramid` (linéaire). Les éléments
+   quadratiques et les polyèdres sont refusés. Les tétraèdres sont acceptés
+   mais `SplitVolumes` les ignore ensuite.
 
-### Étape 2 — Validation et indexation des faces inlet/outlet
+### Étape 3 — Faces de l'inlet et de l'outlet
 
-Pour chaque côté (`iSide = 0` inlet, `1` outlet) et pour chaque face :
+Pour chaque face de l'inlet (`iSide = 0`) puis de l'outlet (`iSide = 1`) :
 
-1. La face doit appartenir au maillage et être un `Triangle` ou un
-   `Quadrangle` linéaire.
-2. Pas de nœud répété dans la face.
-3. Pas de doublon dans le même côté. La face est rangée dans
-   `faces[iSide]`, une `map<TVolumeFaceKey, face>`.
-4. Pour l'outlet : la face ne doit pas exister aussi dans l'inlet. Les deux
-   surfaces doivent être distinctes.
-5. Ses nœuds sont ajoutés à `nodes[iSide]`.
-6. **Propriétaire unique au bord** : on parcourt les volumes qui contiennent
-   la face (`GetElementsByNodes` + `GetFaceIndex`). Chaque volume
-   « propriétaire » trouvé doit :
-   - appartenir à la sélection `elems` ;
-   - avoir cette face libre (`IsFaceExternal`/`IsFreeFace`). La face est donc
-     au bord du domaine ;
-   - avoir une connectivité de face compatible avec celle de l'élément 2D. On
-     part du nœud `ownerNodes[0]` et on vérifie que les nœuds de la face du
-     volume suivent ceux de la face 2D dans un sens ou dans l'autre
-     (`forward`/`backward`). L'orientation peut donc être inversée ;
-   - pour un quadrangle : ne pas déjà avoir de tétraèdre adjacent sur l'un des
-     triangles possibles (`TTriangleFacet::hasAdjacentVol`). Une diagonale
-     serait déjà fixée par ailleurs, et on ne pourrait plus l'imposer.
+1. La face appartient au maillage et est un `Triangle` ou un `Quadrangle`
+   linéaire.
+2. Une face de l'outlet n'est pas aussi dans l'inlet.
+3. La face n'a pas de nœud répété.
+4. Ses nœuds sont ajoutés à `nodes[iSide]`.
+5. **Volume propriétaire** : on cherche les volumes qui ont cette face
+   (`GetElementsByNodes` + `GetFaceIndex`). Chacun doit :
+   - appartenir à `elems` ;
+   - n'avoir aucun voisin sur cette face (`IsFreeFace`). La face est donc au
+     bord du domaine, et il ne peut pas y avoir plusieurs propriétaires ;
+   - pour un quadrangle : avoir les mêmes diagonales que la face 2D
+     (`isQuadDiagonal`). L'orientation et le nœud de départ peuvent différer.
+     Sinon, la diagonale choisie sur la face 2D ne serait pas une diagonale de
+     la face du volume, et `getTetraSplitMethod` l'ignorerait ;
+   - pour un quadrangle : n'avoir aucun tétraèdre accolé à l'un des triangles
+     possibles (`TTriangleFacet::hasAdjacentVol`). La diagonale serait déjà
+     fixée et on ne pourrait plus l'imposer.
 
-   Il faut exactement **un** propriétaire (`nbOwners == 1`).
+   Il faut ensuite `nbOwners == 1`. Comme `IsFreeFace` exclut déjà plusieurs
+   propriétaires, ce test détecte en pratique une face sans volume.
 
 Après la boucle : `nodes[0].size() == nodes[1].size()`.
 
-### Étape 3 — Calcul de la translation
+Deux faces distinctes avec les mêmes nœuds sur un même côté sont détectées à
+l'étape 6.
 
-On calcule le barycentre des nœuds de chaque surface **relativement au premier
-nœud** (`origin`). Cela évite d'additionner de grandes coordonnées absolues et
-donc de perdre en précision :
+### Étape 4 — Translation
+
+La translation est le vecteur entre le barycentre des
+nœuds des deux surfaces. Chaque moyenne est calculée relativement au premier
+nœud de la surface (`origin`), pour ne pas perdre de précision sur de grandes
+coordonnées :
 
 ```
 centre[s] = origin_s + (1/N) * Σ (P_i - origin_s)
 translation = centre[outlet] - centre[inlet]
 ```
 
-Ce calcul n'est valable que si l'outlet est l'image exacte de l'inlet par une
-translation (mêmes nœuds, même maillage). Une rotation n'est pas prise en
-compte.
-
-### Étape 4 — Appariement des nœuds
+### Étape 5 — Appariement des nœuds
 
 - Un `SMESH_OctreeNode` est construit sur les nœuds de l'outlet.
-- Pour chaque nœud `P` de l'inlet, on cherche les nœuds de l'outlet à moins de
-  `tolerance` de `P + translation` (`NodesAround`).
-- Il faut **exactement un** candidat, pas encore apparié (`matchedNodes`).
-  Sinon on lève l'erreur « missing or ambiguous translated node on Outlet ».
-- On obtient la bijection `nodeMap : nœud inlet → nœud outlet`.
+- Pour chaque nœud `P` de l'inlet, `NodesAround` cherche les nœuds de l'outlet
+  à moins de `Precision::Confusion()` de `P + translation`.
+- Il faut exactement un candidat, pas encore apparié (`matchedNodes`).
+- Résultat : la bijection `nodeMap : nœud inlet → nœud outlet`.
 
-### Étape 5 — Appariement des faces
+### Étape 6 — Appariement des faces
 
 Pour chaque face de l'inlet :
 
-1. On calcule l'ensemble de ses nœuds translatés (via `nodeMap`) et on cherche
-   la face de l'outlet de même clé dans `faces[1]`. Elle doit exister et ne pas
-   être déjà appariée (`matchedFaces`).
-2. On vérifie l'ordre cyclique des nœuds : l'image de la face inlet doit suivre
-   la face outlet dans un sens ou dans l'autre (même test `forward`/`backward`
-   qu'à l'étape 2). Cela exclut par exemple un quadrangle dont l'image aurait
-   les bons nœuds dans un ordre « croisé ».
-3. La paire `(faceInlet, faceOutlet)` est rangée dans `facePairs`.
+1. On prend l'image de ses nœuds par `nodeMap`, dans l'ordre de la face.
+2. Parmi les faces qui contiennent ces nœuds (`SMDS_Mesh::GetElementsByNodes`),
+   on garde celles qui ont le même nombre de nœuds et appartiennent à
+   l'outlet. Il en faut exactement une, pas encore appariée (`matchedFaces`).
+3. Pour chaque quadrangle, on vérifie que son image est également un quandrangle, et que la numérotation correspond (pour placer correctement la diagonale des deux côtés).
+4. La paire `(faceInlet, faceOutlet)` est rangée dans `facePairs`.
 
-Comme `inlet.size() == outlet.size()` et que l'appariement est injectif, on
-obtient une bijection entre les faces.
 
-### Étape 6 — Choix et report des diagonales
+### Étape 7 — Choix des diagonales
 
-Cette étape vient **après** toutes les validations, parce que
-`SMESH_MeshEditor::BestSplit` appelle `ClearLastCreated()` et modifie donc
-l'état de l'éditeur.
+Pour chaque paire dont la face inlet est un quadrangle `n[0..3]` :
 
-Pour chaque paire dont la face inlet est un quadrangle :
-
-1. `BestSplit(face, AspectRatio)` renvoie `1` (diagonale 0-2) ou `2`
-   (diagonale 1-3). On en déduit `i = résultat - 1`, puis
-   `n1 = face->GetNode(i)` et `n2 = face->GetNode(i+2)`.
-2. Entrée pour la face inlet : `TVolumeFaceKey(faceInlet) → (n1, n2)`.
-3. Entrée pour la face outlet : `TVolumeFaceKey(faceOutlet) → (nodeMap[n1], nodeMap[n2])`.
-
-La diagonale est choisie selon la qualité des triangles **de l'inlet**.
-L'outlet reçoit l'image exacte de cette diagonale. Comme les deux faces sont
-identiques à une translation près, la qualité est la même des deux côtés.
+1. On construit les deux triangulations possibles avec des `SMDS_FaceOfNodes`
+   temporaires : `(012, 230)` pour la diagonale 0-2 et `(123, 301)` pour la
+   diagonale 1-3.
+2. On garde celle dont la somme des `getBadRate(..., AspectRatio)` est la plus
+   petite, comme `SMESH_MeshEditor::BestSplit`. En cas d'égalité, la
+   diagonale 0-2.
+3. On ajoute `SMESH_TLink( n[i], n[i+2] )` (inlet) et
+   `SMESH_TLink( nodeMap[n[i]], nodeMap[n[i+2]] )` (outlet).
 
 ---
 
-## 4. Utilisation des diagonales dans `getTetraSplitMethod`
+## 4. Utilisation dans `getTetraSplitMethod`
 
-Pour chaque face quadrangulaire `iF` du volume en cours :
+Pour chaque face quadrangulaire `iF` du volume :
 
-1. Comme avant, on cherche si un tétraèdre adjacent (déjà créé) impose une
-   diagonale. On remplit alors `triaSplits` avec `t012` ou `t123`.
-2. Si `periodicDiagonals` n'est pas vide, on cherche une contrainte avec
-   `TVolumeFaceKey(vol, iF)`. Si elle existe :
-   - `iCommon = 0` si le nœud local `nInd[0]` est une extrémité de la
-     diagonale, `1` sinon. La diagonale est alors `nInd[iCommon]`–`nInd[iCommon+2]` ;
-   - on construit le triangle `(nInd[iCommon], nInd[iCommon+1], nInd[iCommon+2])` ;
-   - si `triaSplits` contient déjà un triangle qui ne porte pas cette
-     diagonale, on lève l'erreur « conflicting periodic and adjacent
-     diagonals » ;
-   - si `triaSplits` est vide, on y ajoute ce triangle.
-3. Les variantes standard (`theHexTo5`, `theHexTo6`, `thePyraTo2`,
+1. Comme avant, si un tétraèdre déjà créé est accolé à la face, sa diagonale
+   est ajoutée à `triaSplits` (`t012` ou `t123`).
+2. Si `SMESH_TLink( fNodes[0], fNodes[2] )` (`iCommon = 0`) ou
+   `SMESH_TLink( fNodes[1], fNodes[3] )` (`iCommon = 1`) est dans
+   `periodicDiagonals`, le triangle
+   `(nInd[iCommon], nInd[iCommon+1], nInd[iCommon+2])` est ajouté à
+   `triaSplits`. Un `ASSERT( triaSplits.empty() )` (actif en debug seulement)
+   vérifie qu'aucun tétraèdre n'était accolé, ce que l'étape 3 garantit.
+3. Les variantes standard (`theHexTo5` ou `theHexTo6`, `thePyraTo2`,
    `thePentaTo3`) sont essayées dans l'ordre. On garde la première qui contient
-   **toutes** les facettes de `triaSplits` (`TSplitMethod::hasFacet`) et qui,
-   si demandé, n'est pas sur-contrainte.
-4. Si aucune variante ne convient, on passe au **découpage barycentrique** : un
-   nœud est créé au centre du volume, et chaque face est triangulée puis reliée
-   à ce nœud. Pour une face qui a une entrée dans `triaSplits`, `iCommon` est
-   tiré du premier triangle de la liste. La diagonale imposée est donc aussi
-   respectée dans ce cas. Un hexaèdre donne alors 12 tétraèdres et un nœud
-   intérieur.
+   toutes les facettes de `triaSplits` (`TSplitMethod::hasFacet`) et qui, si
+   demandé, n'est pas sur-contrainte.
+4. Sinon, on passe au **découpage barycentrique** : un nœud est créé au centre
+   du volume, chaque face est triangulée et reliée à ce nœud. Une face qui a
+   une entrée dans `triaSplits` est triangulée selon cette entrée : la
+   diagonale imposée est donc respectée. Un hexaèdre donne alors 12 tétraèdres.
 
-Ensuite, `SplitVolumes` triangule les faces 2D existantes avec les facettes des
-tétraèdres créés (`splitMethod.hasFacet`). Les triangles des faces inlet/outlet
-portent donc les diagonales imposées, et `ReplaceElemInGroups` met à jour les
-groupes.
-
-Remarque : l'ancienne version forçait `facetCreated = true` quand
-`ensurePeriodicity` était vrai. La première variante était alors acceptée sans
-vérifier la compatibilité avec les voisins. Ce n'est plus le cas.
+Ensuite, pendant le découpage de chaque volume, `SplitVolumes` remplace les
+faces 2D posées sur ses faces quadrangulaires par des triangles qui suivent
+les tétraèdres créés (`splitMethod.hasFacet`), et met à jour les groupes
+(`ReplaceElemInGroups`). Les triangles de l'inlet et de l'outlet portent donc
+les diagonales imposées.
 
 ---
 
@@ -249,14 +206,18 @@ vérifier la compatibilité avec les voisins. Ce n'est plus le cas.
 ```
 SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet)
 │
-├─ getPeriodicDiagonals                      (aucune modification du maillage
-│   ├─ 0. méthode HEXA_TO_5/6, tailles        avant la fin des validations)
-│   ├─ 1. volumes : types linéaires, conformité des quadrangles partagés
-│   ├─ 2. faces   : type, unicité, un seul propriétaire, face libre, ordre des nœuds
-│   ├─ 3. translation = barycentre(outlet) − barycentre(inlet)
-│   ├─ 4. nœud inlet  → nœud outlet   (octree, tolérance 1e-7, bijection)
-│   ├─ 5. face inlet  → face outlet   (clé de nœuds + ordre cyclique)
-│   └─ 6. quadrangle  : BestSplit sur l'inlet → diagonale (n1,n2)
+├─ méthode HEXA_TO_5 / HEXA_TO_6 / HEXA_TO_24 ?  sinon erreur
+├─ HEXA_TO_24 → pas de diagonale, découpage normal
+│
+├─ getPeriodicDiagonals                      (aucune modification du maillage)
+│   ├─ 1. arguments non vides, même nombre de faces
+│   ├─ 2. volumes : dans le maillage, découpage en tétraèdres, types linéaires
+│   ├─ 3. faces   : type, distinctes, un seul propriétaire, face libre,
+│   │               mêmes diagonales que la face du volume, pas de tétra accolé
+│   ├─ 4. translation = centre(outlet) − centre(inlet)
+│   ├─ 5. nœud inlet  → nœud outlet   (octree, Precision::Confusion(), bijection)
+│   ├─ 6. face inlet  → face outlet   (nœuds translatés + diagonales compatibles)
+│   └─ 7. quadrangle  : AspectRatio sur l'inlet → diagonale (n1,n2)
 │                       outlet ← (nodeMap[n1], nodeMap[n2])
 │
 └─ pour chaque volume :
@@ -269,64 +230,64 @@ SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet)
 
 ---
 
-## 6. Points d'attention pour les développeurs
+## 6. Points d'attention
 
-- **Hexaèdres et `Hex_5Tet`.** Dans les deux variantes de `theHexTo5`, les
-  faces opposées d'un hexaèdre ont des diagonales « croisées ». Variante 1 :
-  0-2 en bas, 5-7 en haut. Variante 2 : 1-3 en bas, 4-6 en haut. L'image par
-  translation de 0-2 est 4-6, pas 5-7. Si l'inlet et l'outlet sont deux faces
-  opposées d'une même colonne d'hexaèdres, la compatibilité dépend donc de la
-  parité du nombre de couches. En cas d'échec, on retombe sur le découpage
-  barycentrique (12 tétraèdres et un nœud de plus par hexaèdre concerné).
-  Avec `Hex_6Tet`, toutes les variantes ont des diagonales parallèles sur les
-  faces opposées (variante 1 : 0-2 en bas, 4-6 en haut). Ce problème n'existe
-  donc pas.
-- **Tolérance absolue** (`1e-7`, en unités du maillage). Elle n'est pas mise à
-  l'échelle de la taille du maillage. Un maillage très grand, ou importé avec
-  un arrondi des coordonnées, peut échouer à l'étape 4.
+- **`Hex_5Tet` et parité.** Dans `theHexTo5`, les faces opposées d'un hexaèdre
+  ont des diagonales croisées : variante 1, 0-2 en bas et 5-7 en haut ;
+  variante 2, 1-3 en bas et 4-6 en haut. Or l'image par translation de 0-2 est
+  4-6. Si l'inlet et l'outlet sont aux deux bouts d'une colonne d'hexaèdres,
+  la compatibilité dépend donc de la parité du nombre de couches. En cas
+  d'échec, l'hexaèdre concerné passe au découpage barycentrique (12 tétraèdres
+  et un nœud de plus). `Hex_6Tet` n'a pas ce problème : ses variantes ont des
+  diagonales parallèles sur les faces opposées (variante 1 : 0-2 et 4-6).
 - **Translation uniquement.** Les périodicités par rotation ne sont pas gérées.
-  La translation est estimée par les barycentres. Elle est donc fausse si les
-  deux surfaces n'ont pas exactement la même distribution de nœuds.
-- **Ordre des appels.** `BestSplit` vide l'historique de création de l'éditeur.
-  Il doit rester après toutes les vérifications, et aucune nouvelle
-  vérification qui lève une exception ne doit être ajoutée après l'étape 6.
-- **Exception dans `getTetraSplitMethod`.** L'erreur « conflicting periodic and
-  adjacent diagonals » serait levée **pendant** la boucle de découpage, donc
-  avec un maillage partiellement modifié. En pratique, les vérifications des
-  étapes 1 et 2 rendent ce cas inatteignable : une face périodique est libre,
-  n'a qu'un seul propriétaire et n'a pas de tétraèdre adjacent. Ce test sert de
-  garde-fou.
-- **Accès à `nodeMap` sans test** (`nodeMap.find(...)->second`). C'est sûr
-  parce que tous les nœuds des faces inlet sont dans `nodes[0]` et ont tous été
-  appariés à l'étape 4. Toute modification de ces étapes doit conserver cette
-  propriété.
-- **Côtés asymétriques.** La qualité est évaluée sur l'inlet seulement. Comme
-  les deux faces sont identiques à une translation près, cela ne change rien,
-  mais on pourrait aussi choisir côté outlet sans changer le résultat.
+  La translation est estimée par les centres des nœuds : elle est fausse si
+  l'outlet n'a pas exactement la même distribution de nœuds que l'inlet.
+- **Tolérance absolue.** `Precision::Confusion()` n'est pas mise à l'échelle du
+  maillage. Un très grand maillage, ou des coordonnées arrondies à l'import,
+  peuvent échouer à l'étape 5.
+- **Toutes les erreurs avant la première modification.** `SplitVolumes`
+  modifie le maillage volume par volume, sans retour arrière possible. Une
+  exception levée pendant la boucle de découpage laisserait le maillage à
+  moitié découpé. C'est pourquoi toutes les vérifications sont faites dans
+  `getPeriodicDiagonals`, avant la boucle, et pourquoi `getTetraSplitMethod`
+  n'utilise qu'un `ASSERT`. Toute nouvelle vérification doit suivre la même
+  règle.
+- **Recherche par diagonale.** `getTetraSplitMethod` cherche seulement la paire
+  de nœuds. Chaque quadrange est identifié de manière unique par sa diagonale (vrai pour un maillage conforme).
+- **Accès à `nodeMap` sans test** Lors des étapes 6 et 7, l'accès :`nodeMap.find(...)->second` est assuré par la contruction à l'étape 5.
 
 ---
 
-## 7. Messages d'erreur (`SALOME_Exception`)
+## 7. Messages d'erreur
+
+### `SALOME_Exception` (`SMESH_MeshEditor.cxx`, préfixe « SplitVolumes: »)
 
 | Message | Étape | Cause |
 |---|---|---|
-| `periodicity requires Hex_5Tet or Hex_6Tet` | 0 | Méthode non supportée (ex. `Hex_24Tet`). |
-| `volumes, Inlet and Outlet must not be empty` | 0 | Une des entrées est vide. |
-| `Inlet and Outlet have different numbers of faces` | 0 | Tailles différentes. |
-| `invalid volume selection for periodicity` | 1 | Volume absent du maillage, ou demande de découpage en prismes. |
-| `periodicity supports only linear tetrahedra, hexahedra, prisms and pyramids` | 1 | Élément quadratique, polyèdre, etc. |
-| `invalid periodic volume` | 1 | `SMDS_VolumeTool::Set` a échoué. |
-| `periodic selection leaves an unsplit volume across a quadrangular face` | 1 | Un voisin non sélectionné partage un quadrangle. |
-| `Inlet and Outlet must contain linear triangles or quadrangles of this mesh` | 2 | Face invalide, quadratique ou d'un autre maillage. |
-| `repeated node in a periodic face` | 2 | Face dégénérée. |
-| `duplicate periodic face` | 2 | Même face deux fois dans un côté. |
-| `Inlet and Outlet must be distinct surfaces` | 2 | Une face est dans les deux côtés. |
-| `a periodic face is not on the boundary of the selected volumes` | 2 | Propriétaire non sélectionné, ou face intérieure. |
-| `a periodic face has incompatible volume connectivity` | 2 | Ordre des nœuds incohérent entre la face 2D et la face du volume. |
-| `a periodic quadrangle already has adjacent tetrahedra` | 2 | Diagonale déjà fixée par un tétraèdre existant. |
-| `each periodic face must have one selected owner` | 2 | Zéro ou plusieurs volumes propriétaires. |
-| `Inlet and Outlet have different numbers of nodes` | 2 | Nombre de nœuds différent. |
-| `missing or ambiguous translated node on Outlet` | 4 | Pas d'image unique d'un nœud à la tolérance. |
-| `periodic face connectivities do not match` | 5 | Pas de face outlet correspondant à une face inlet. |
-| `periodic faces have incompatible node ordering` | 5 | Bons nœuds, mais ordre cyclique différent. |
-| `conflicting periodic and adjacent diagonals` | `getTetraSplitMethod` | Garde-fou (voir §6). |
+| `periodicity requires Hex_5Tet, Hex_6Tet or Hex_24Tet` | avant l'appel | Méthode non supportée. |
+| `volumes, Inlet and Outlet must not be empty` | 1 | Une des entrées est vide. |
+| `Inlet and Outlet have different numbers of faces` | 1 | Tailles différentes. |
+| `invalid volume selection for periodicity` | 2 | Volume absent du maillage, ou découpage en prismes demandé. |
+| `periodicity supports only linear tetrahedra, hexahedra, prisms and pyramids` | 2 | Élément quadratique, polyèdre, etc. |
+| `Inlet and Outlet must contain linear triangles or quadrangles of this mesh` | 3 | Face invalide, quadratique ou d'un autre maillage. |
+| `Inlet and Outlet must be distinct surfaces` | 3 | Une face est dans les deux côtés. |
+| `repeated node in a periodic face` | 3 | Face dégénérée. |
+| `a periodic face is not on the boundary of the selected volumes` | 3 | Propriétaire non sélectionné, ou face partagée par deux volumes. |
+| `a periodic face has incompatible volume connectivity` | 3 | Les diagonales de la face 2D ne sont pas celles de la face du volume. |
+| `a periodic quadrangle already has adjacent tetrahedra` | 3 | Diagonale déjà fixée par un tétraèdre existant. |
+| `each periodic face must have one selected owner` | 3 | Aucun volume ne porte la face. |
+| `Inlet and Outlet have different numbers of nodes` | 3 | Nombre de nœuds différent. |
+| `missing or ambiguous translated node on Outlet` | 5 | Pas d'image unique d'un nœud à la tolérance. |
+| `periodic face connectivities do not match` | 6 | Zéro ou plusieurs faces outlet pour une face inlet, ou face outlet déjà appariée. |
+| `periodic faces have incompatible node ordering` | 6 | Bons nœuds, mais diagonales différentes. |
+
+### Couches d'interface
+
+Ces vérifications s'appliquent aussi avec `Hex_24Tet`.
+
+| Couche | Message | Cause |
+|---|---|---|
+| CORBA (`BAD_PARAM`) | `Inlet and outlet must be FACE sources of this mesh` | Source invalide ou d'un autre maillage. |
+| CORBA (`BAD_PARAM`) | `Inlet and outlet must not be empty` | Source vide. |
+| Python (`ValueError`) | `ensurePeriodicity requires inlet and outlet FACE sources` | `inlet` ou `outlet` vaut `None`. |

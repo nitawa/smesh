@@ -2669,6 +2669,8 @@ namespace
    * \param [in] elems - the volumes to split.
    * \param [in] inlet - the faces of the Inlet.
    * \param [in] outlet - the faces of the Outlet.
+   * \param [in] tolerance - the absolute distance (in mesh units) used to match each
+   *        periodic nodes. The default is Precision::Confusion() (1e-7) from OCC.
    * \return the diagonal to use for each periodic quadrangle.
    */
   //=======================================================================
@@ -2676,21 +2678,20 @@ namespace
   TPeriodicDiagonals getPeriodicDiagonals( const SMESHDS_Mesh*                   meshDS,
                                            const SMESH_MeshEditor::TFacetOfElem& elems,
                                            const TIDSortedElemSet&               inlet,
-                                           const TIDSortedElemSet&               outlet )
+                                           const TIDSortedElemSet&               outlet,
+                                           const double                          tolerance = Precision::Confusion() )
   {
-    const double aTol = Precision::Confusion();
     // STEP 1: Examine the arguments.
     if ( elems.empty() || inlet.empty() || outlet.empty() )
       throw SALOME_Exception( "SplitVolumes: volumes, Inlet and Outlet must not be empty" );
+    // The tolerance must be positive (this also rejects NaN).
+    if ( !( tolerance > 0. ))
+      throw SALOME_Exception( "SplitVolumes: the periodicity tolerance must be positive" );
     // The Inlet and the Outlet must have the same number of faces.
     if ( inlet.size() != outlet.size() )
       throw SALOME_Exception( "SplitVolumes: Inlet and Outlet have different numbers of faces" );
 
     // STEP 2: Examine the selected volumes.
-    // The split cuts each quadrangular face of a selected volume along a diagonal.
-    // Select All the volumes on sides of quadrangular faces to keep the mesh conformal.
-    SMDS_VolumeTool vol;
-    vector< const SMDS_MeshElement* > neighbours;
     for ( const auto& elemFacet : elems )
     {
       const SMDS_MeshElement* elem = elemFacet.first;
@@ -2711,25 +2712,6 @@ namespace
         throw SALOME_Exception( "SplitVolumes: periodicity supports only linear tetrahedra, "
                                 "hexahedra, prisms and pyramids" );
       }
-      if ( !vol.Set( elem ))
-        throw SALOME_Exception( "SplitVolumes: invalid periodic volume" );
-      // Examine each quadrangular face of the volume.
-      for ( int iF = 0; iF < vol.NbFaces(); ++iF )
-      {
-        if ( vol.NbFaceNodes( iF ) != 4 ) continue;
-        // Find all the volumes that use the four nodes of the face.
-        const SMDS_MeshNode** nodes = vol.GetFaceNodes( iF );
-        vector< const SMDS_MeshNode* > faceNodes( nodes, nodes + 4 );
-        set< const SMDS_MeshNode* > faceNodeSet( nodes, nodes + 4 );
-        neighbours.clear();
-        SMDS_Mesh::GetElementsByNodes( faceNodes, neighbours, SMDSAbs_Volume );
-        // If one of these volumes is not selected and has this face, stop with an error.
-        for ( const SMDS_MeshElement* neighbour : neighbours )
-          if ( elems.find( neighbour ) == elems.end() &&
-               SMDS_VolumeTool( neighbour ).GetFaceIndex( faceNodeSet ) >= 0 )
-            throw SALOME_Exception( "SplitVolumes: periodic selection leaves an unsplit "
-                                    "volume across a quadrangular face" );
-      }
     }
 
     // STEP 3: Examine the faces of the Inlet and of the Outlet.
@@ -2737,6 +2719,7 @@ namespace
     // nodes[] keeps all the nodes of each side.
     TIDSortedNodeSet nodes[2];
     const TIDSortedElemSet* sides[] = { &inlet, &outlet };
+    vector< const SMDS_MeshElement* > neighbours;
     for ( int iSide = 0; iSide < 2; ++iSide )
       for ( const SMDS_MeshElement* face : *sides[ iSide ])
       {
@@ -2828,7 +2811,7 @@ namespace
       // Move the Inlet node with the translation.
       // Find the Outlet nodes near this position (distance less than the tolerance).
       candidates.clear();
-      searcher.NodesAround( SMESH_NodeXYZ( node ) + translation, candidates, aTol );
+      searcher.NodesAround( SMESH_NodeXYZ( node ) + translation, candidates, tolerance );
       // There must be one Outlet node only.
       // This Outlet node must not agree with a different Inlet node.
       if ( candidates.size() != 1 || !matchedNodes.insert( candidates[0] ).second )
@@ -2901,7 +2884,8 @@ namespace
 //           else a hexahedron is split into prisms so that the given facet is
 //           split into triangles
 //           Avoid over-constrained volumes if true (only for tetras)
-//           Ensure periodicity between given faces if ensurePeriodicity is true
+//           Ensure periodicity between given faces if ensurePeriodicity is true,
+//           matching their nodes within periodicTolerance
 //=======================================================================
 
 void SMESH_MeshEditor::SplitVolumes (const TFacetOfElem & theElems,
@@ -2909,7 +2893,8 @@ void SMESH_MeshEditor::SplitVolumes (const TFacetOfElem & theElems,
                                      const bool avoidOverConstrainedVolumes,
                                      const bool ensurePeriodicity,
                                      const TIDSortedElemSet& theInlet,
-                                     const TIDSortedElemSet& theOutlet )
+                                     const TIDSortedElemSet& theOutlet,
+                                     const double            periodicTolerance )
 {
   // Despite its name, HEXA_TO_24 applies to all volume types (hexahedra, prisms, pyramids):
   // each quadrangle is cut with a barycentric node, not along a diagonal.
@@ -2921,7 +2906,8 @@ void SMESH_MeshEditor::SplitVolumes (const TFacetOfElem & theElems,
     throw SALOME_Exception( "SplitVolumes: periodicity requires Hex_5Tet, Hex_6Tet or Hex_24Tet" );
   TPeriodicDiagonals periodicDiagonals;
   if ( ensurePeriodicity && theMethodFlags != HEXA_TO_24 )
-    periodicDiagonals = getPeriodicDiagonals( GetMeshDS(), theElems, theInlet, theOutlet );
+    periodicDiagonals = getPeriodicDiagonals( GetMeshDS(), theElems, theInlet, theOutlet,
+                                              periodicTolerance );
 
   SMDS_VolumeTool    volTool;
   SMESH_MesherHelper helper( *GetMesh()), fHelper(*GetMesh());
