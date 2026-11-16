@@ -17,9 +17,9 @@ Couches d'interface :
 
 | Couche | Point d'entrée |
 |---|---|
-| IDL (`idl/SMESH_MeshEditor.idl`) | `SplitVolumesIntoTetraWithPeriodicity( elems, methodFlags, inlet, outlet, avoidOverConstrainedVolumes )` |
-| CORBA (`src/SMESH_I/SMESH_MeshEditor_i.cxx`) | Convertit `elems` en volumes (facette `-1`) et `inlet`/`outlet` en `TIDSortedElemSet` de faces, puis appelle `SplitVolumes( ..., ensurePeriodicity = true, ... )`. |
-| Python (`src/SMESH_SWIG/smeshBuilder.py`) | `Mesh.SplitVolumesIntoTetra( elems, method, avoidOverConstrainedVolumes, ensurePeriodicity=False, inlet=None, outlet=None )` |
+| IDL (`idl/SMESH_MeshEditor.idl`) | `SplitVolumesIntoTetraWithPeriodicity( elems, methodFlags, inlet, outlet, avoidOverConstrainedVolumes, tolerance )` |
+| CORBA (`src/SMESH_I/SMESH_MeshEditor_i.cxx`) | Convertit `elems` en volumes (facette `-1`) et `inlet`/`outlet` en `TIDSortedElemSet` de faces, puis appelle `SplitVolumes( ..., ensurePeriodicity = true, inlet, outlet, tolerance )`. |
+| Python (`src/SMESH_SWIG/smeshBuilder.py`) | `Mesh.SplitVolumesIntoTetra( elems, method, avoidOverConstrainedVolumes, ensurePeriodicity=False, inlet=None, outlet=None, tolerance=1e-7 )` |
 
 ---
 
@@ -59,16 +59,19 @@ typedef std::set< SMESH_TLink > TPeriodicDiagonals;
 TPeriodicDiagonals getPeriodicDiagonals( const SMESHDS_Mesh*                   meshDS,
                                          const SMESH_MeshEditor::TFacetOfElem& elems,
                                          const TIDSortedElemSet&               inlet,
-                                         const TIDSortedElemSet&               outlet );
+                                         const TIDSortedElemSet&               outlet,
+                                         const double                          tolerance = Precision::Confusion() );
 ```
 
 - `meshDS` : le maillage. Il sert seulement à vérifier que les éléments en font partie.
 - `elems` : volumes à découper (map volume → index de facette ; `-1` = découpage en tétraèdres).
 - `inlet`, `outlet` : faces 2D (triangles/quadrangles linéaires) des deux surfaces périodiques.
+- `tolerance` : distance absolue (unités du maillage) pour apparier un nœud de
+  l'inlet et son translaté sur l'outlet. Elle doit être strictement positive.
 - Valeur de retour : deux diagonales par paire de quadrangles appariés, une
   pour l'inlet et une pour l'outlet. Les triangles n'en ont pas.
 
-La tolérance d'appariement des nœuds est réglée sur `Precision::Confusion()` (`1e-7`, la précision d'OCC pour les superpositions).
+La tolérance est optionnelle à tous les niveaux. Sa valeur par défaut est `Precision::Confusion()` (`1e-7`, la précision d'OCC pour les superpositions). `SplitVolumes` la transmet par son paramètre `theTolerance`, CORBA par `tolerance`, et Python par l'argument `tolerance=1e-7`.
 
 `SMESH_TLink` est une paire de nœuds triée : le sens de la diagonale ne compte
 pas. Une diagonale suffit à identifier son quadrangle, il n'y a donc pas de clé
@@ -127,21 +130,48 @@ l'étape 6.
 
 ### Étape 4 — Translation
 
-La translation est le vecteur entre le barycentre des
-nœuds des deux surfaces. Chaque moyenne est calculée relativement au premier
-nœud de la surface (`origin`), pour ne pas perdre de précision sur de grandes
-coordonnées :
+La translation est le vecteur entre les centres des nœuds des deux surfaces.
 
-```
-centre[s] = origin_s + (1/N) * Σ (P_i - origin_s)
-translation = centre[outlet] - centre[inlet]
-```
+Notations : $i \in \{0, 1\}$ (0 = inlet, 1 = outlet), $\mathcal{N}_i$ les
+nœuds de la surface $i$, $n_i = |\mathcal{N}_i|$, $\mathbf{x}_k$ les
+coordonnées du nœud $k$, $\mathbf{o}_i$ le premier nœud de $\mathcal{N}_i$
+(`origin`).
+
+$$
+\mathbf{c}_i = \mathbf{o}_i + \frac{1}{n_i} \sum_{k \in \mathcal{N}_i} \left( \mathbf{x}_k - \mathbf{o}_i \right)
+\;=\; \frac{1}{n_i} \sum_{k \in \mathcal{N}_i} \mathbf{x}_k
+\qquad
+\mathbf{t} = \mathbf{c}_1 - \mathbf{c}_0
+$$
+
+$\mathbf{c}_i$ est la moyenne simple des positions des nœuds (pas le centre
+géométrique pondéré par les aires). Le biais dû à un maillage non uniforme est
+le même sur les deux surfaces et disparaît dans la différence.
+
+**Intérêt du calcul relatif à $\mathbf{o}_i$.** Les deux écritures sont égales
+en arithmétique exacte, pas en virgule flottante ($\varepsilon \approx 2.2 \times 10^{-16}$).
+Soit $D_i$ le diamètre de la surface $i$ (plus grande distance entre deux de
+ses nœuds). Comme $\mathbf{o}_i$ appartient à la surface,
+$\|\mathbf{x}_k - \mathbf{o}_i\| \le D_i$ quel que soit le nœud choisi.
+
+| Calcul | Erreur d'arrondi sur la somme |
+|---|---|
+| Somme directe des $\mathbf{x}_k$ | $\sim \varepsilon\, n_i \Vert\mathbf{x}\Vert$ |
+| Somme des $\mathbf{x}_k - \mathbf{o}_i$ | $\sim \varepsilon\, n_i D_i$ |
+
+Le calcul relatif retire le facteur $n_i$ devant les grandes coordonnées.
+L'erreur totale sur $\mathbf{t}$ devient $\sim \varepsilon\,(\|\mathbf{c}\| + n_i D_i)$
+au lieu de $\sim \varepsilon\, n_i \|\mathbf{c}\|$. Le terme $\varepsilon \|\mathbf{c}\|$
+reste dans tous les cas : il est déjà dans les coordonnées stockées.
+Le gain n'apparaît que si la surface est petite devant sa distance à l'origine
+du repère ($D_i \ll \|\mathbf{x}\|$, par exemple un tube de 10 cm placé à 1 km
+de l'origine). Sinon les deux calculs se valent.
 
 ### Étape 5 — Appariement des nœuds
 
 - Un `SMESH_OctreeNode` est construit sur les nœuds de l'outlet.
 - Pour chaque nœud `P` de l'inlet, `NodesAround` cherche les nœuds de l'outlet
-  à moins de `Precision::Confusion()` de `P + translation`.
+  à moins de `tolerance` de `P + translation`.
 - Il faut exactement un candidat, pas encore apparié (`matchedNodes`).
 - Résultat : la bijection `nodeMap : nœud inlet → nœud outlet`.
 
@@ -204,18 +234,18 @@ les diagonales imposées.
 ## 5. Schéma récapitulatif
 
 ```
-SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet)
+SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet, tolerance)
 │
 ├─ méthode HEXA_TO_5 / HEXA_TO_6 / HEXA_TO_24 ?  sinon erreur
 ├─ HEXA_TO_24 → pas de diagonale, découpage normal
 │
 ├─ getPeriodicDiagonals                      (aucune modification du maillage)
-│   ├─ 1. arguments non vides, même nombre de faces
+│   ├─ 1. arguments non vides, même nombre de faces, tolérance > 0
 │   ├─ 2. volumes : dans le maillage, découpage en tétraèdres, types linéaires
 │   ├─ 3. faces   : type, distinctes, un seul propriétaire, face libre,
 │   │               mêmes diagonales que la face du volume, pas de tétra accolé
 │   ├─ 4. translation = centre(outlet) − centre(inlet)
-│   ├─ 5. nœud inlet  → nœud outlet   (octree, Precision::Confusion(), bijection)
+│   ├─ 5. nœud inlet  → nœud outlet   (octree, tolerance, bijection)
 │   ├─ 6. face inlet  → face outlet   (nœuds translatés + diagonales compatibles)
 │   └─ 7. quadrangle  : AspectRatio sur l'inlet → diagonale (n1,n2)
 │                       outlet ← (nodeMap[n1], nodeMap[n2])
@@ -243,9 +273,11 @@ SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet)
 - **Translation uniquement.** Les périodicités par rotation ne sont pas gérées.
   La translation est estimée par les centres des nœuds : elle est fausse si
   l'outlet n'a pas exactement la même distribution de nœuds que l'inlet.
-- **Tolérance absolue.** `Precision::Confusion()` n'est pas mise à l'échelle du
-  maillage. Un très grand maillage, ou des coordonnées arrondies à l'import,
-  peuvent échouer à l'étape 5.
+- **Tolérance absolue.** `tolerance` n'est pas mise à l'échelle du maillage.
+  Avec la valeur par défaut (`1e-7`), un très grand maillage, ou des coordonnées
+  arrondies à l'import, peuvent échouer à l'étape 5 : il faut alors augmenter
+  `tolerance`. Une tolérance trop grande donne plusieurs candidats, et
+  l'étape 5 échoue aussi.
 - **Toutes les erreurs avant la première modification.** `SplitVolumes`
   modifie le maillage volume par volume, sans retour arrière possible. Une
   exception levée pendant la boucle de découpage laisserait le maillage à
@@ -267,6 +299,7 @@ SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet)
 |---|---|---|
 | `periodicity requires Hex_5Tet, Hex_6Tet or Hex_24Tet` | avant l'appel | Méthode non supportée. |
 | `volumes, Inlet and Outlet must not be empty` | 1 | Une des entrées est vide. |
+| `the periodicity tolerance must be positive` | 1 | `tolerance` nulle, négative ou NaN. |
 | `Inlet and Outlet have different numbers of faces` | 1 | Tailles différentes. |
 | `invalid volume selection for periodicity` | 2 | Volume absent du maillage, ou découpage en prismes demandé. |
 | `periodicity supports only linear tetrahedra, hexahedra, prisms and pyramids` | 2 | Élément quadratique, polyèdre, etc. |
