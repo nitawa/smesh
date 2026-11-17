@@ -106,7 +106,9 @@ Pour chaque face de l'inlet (`iSide = 0`) puis de l'outlet (`iSide = 1`) :
    linéaire.
 2. Une face de l'outlet n'est pas aussi dans l'inlet.
 3. La face n'a pas de nœud répété.
-4. Ses nœuds sont ajoutés à `nodes[iSide]`.
+4. Ses nœuds sont ajoutés à `nodes[iSide]`, et chacune de ses arrêtes
+   (`SMESH_TLink`, paire de nœuds triée) est comptée dans `nbFacesOfLink[iSide]`
+   (utilisé à l'étape 4).
 5. **Volume propriétaire** : on cherche les volumes qui ont cette face
    (`GetElementsByNodes` + `GetFaceIndex`). Chacun doit :
    - appartenir à `elems` ;
@@ -130,10 +132,27 @@ l'étape 6.
 
 ### Étape 4 — Translation
 
-La translation est le vecteur entre les centres des nœuds des deux surfaces.
+La translation est le vecteur entre les centres des nœuds du **bord** des deux
+surfaces.
+
+**Nœuds du bord.** Une arrête du bord est une arrête qui n'appartient qu'à une seule
+face de la surface (`nbFacesOfLink[iSide][link] == 1`). Les nœuds de ces liens
+forment `borderNodes[iSide]`.
+
+- Il faut `borderNodes[0]` non vide et
+  `borderNodes[0].size() == borderNodes[1].size()`. Sinon (surface fermée,
+  bords incompatibles), une exception est levée.
+
+Note : `SMESH_MeshAlgos::FindFreeBorders` et `SMESH::Controls::FreeEdges` ne sont pas
+utilisés : ils cherchent les bords libres de tout le maillage 2D, pas ceux d'un
+sous-ensemble de faces. D'autres faces accolées à l'inlet fausseraient le
+résultat.
+
+**Intérêt du bord.** Le centre ne dépend pas des nœuds intérieurs des
+surfaces.
 
 Notations : $i \in \{0, 1\}$ (0 = inlet, 1 = outlet), $\mathcal{N}_i$ les
-nœuds de la surface $i$, $n_i = |\mathcal{N}_i|$, $\mathbf{x}_k$ les
+nœuds du bord de la surface $i$, $n_i = |\mathcal{N}_i|$, $\mathbf{x}_k$ les
 coordonnées du nœud $k$, $\mathbf{o}_i$ le premier nœud de $\mathcal{N}_i$
 (`origin`).
 
@@ -144,8 +163,8 @@ $$
 \mathbf{t} = \mathbf{c}_1 - \mathbf{c}_0
 $$
 
-$\mathbf{c}_i$ est la moyenne simple des positions des nœuds (pas le centre
-géométrique pondéré par les aires). Le biais dû à un maillage non uniforme est
+$\mathbf{c}_i$ est la moyenne simple des positions des nœuds du bord (pas le
+centre géométrique pondéré par les longueurs). Le biais dû à un maillage non uniforme est
 le même sur les deux surfaces et disparaît dans la différence.
 
 **Intérêt du calcul relatif à $\mathbf{o}_i$.** Les deux écritures sont égales
@@ -244,7 +263,7 @@ SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet, tole
 │   ├─ 2. volumes : dans le maillage, découpage en tétraèdres, types linéaires
 │   ├─ 3. faces   : type, distinctes, un seul propriétaire, face libre,
 │   │               mêmes diagonales que la face du volume, pas de tétra accolé
-│   ├─ 4. translation = centre(outlet) − centre(inlet)
+│   ├─ 4. translation = centre(bord outlet) − centre(bord inlet)
 │   ├─ 5. nœud inlet  → nœud outlet   (octree, tolerance, bijection)
 │   ├─ 6. face inlet  → face outlet   (nœuds translatés + diagonales compatibles)
 │   └─ 7. quadrangle  : AspectRatio sur l'inlet → diagonale (n1,n2)
@@ -271,8 +290,9 @@ SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet, tole
   et un nœud de plus). `Hex_6Tet` n'a pas ce problème : ses variantes ont des
   diagonales parallèles sur les faces opposées (variante 1 : 0-2 et 4-6).
 - **Translation uniquement.** Les périodicités par rotation ne sont pas gérées.
-  La translation est estimée par les centres des nœuds : elle est fausse si
-  l'outlet n'a pas exactement la même distribution de nœuds que l'inlet.
+  La translation est estimée par les centres des nœuds du bord : elle est
+  fausse si le bord de l'outlet n'a pas exactement la même distribution de
+  nœuds que celui de l'inlet.
 - **Tolérance absolue.** `tolerance` n'est pas mise à l'échelle du maillage.
   Avec la valeur par défaut (`1e-7`), un très grand maillage, ou des coordonnées
   arrondies à l'import, peuvent échouer à l'étape 5 : il faut alors augmenter
@@ -307,10 +327,11 @@ SplitVolumes(elems, method, avoidOC, ensurePeriodicity=true, inlet, outlet, tole
 | `Inlet and Outlet must be distinct surfaces` | 3 | Une face est dans les deux côtés. |
 | `repeated node in a periodic face` | 3 | Face dégénérée. |
 | `a periodic face is not on the boundary of the selected volumes` | 3 | Propriétaire non sélectionné, ou face partagée par deux volumes. |
-| `a periodic face has incompatible volume connectivity` | 3 | Les diagonales de la face 2D ne sont pas celles de la face du volume. |
-| `a periodic quadrangle already has adjacent tetrahedra` | 3 | Diagonale déjà fixée par un tétraèdre existant. |
+| `the nodes of a periodic quadrangle are not in the same order as in the face of its volume` | 3 | Les nœuds du quadrangle 2D ne sont pas dans le même ordre cyclique que ceux de la face du volume, donc leurs diagonales diffèrent. |
+| `a periodic quadrangle already has adjacent tetrahedra` | 3 | Un tétraèdre existant touche déjà l'un des 4 triangles du quadrangle, donc sa diagonale est déjà fixée. |
 | `each periodic face must have one selected owner` | 3 | Aucun volume ne porte la face. |
 | `Inlet and Outlet have different numbers of nodes` | 3 | Nombre de nœuds différent. |
+| `Inlet and Outlet borders are missing or have different numbers of nodes` | 4 | Surface fermée (aucun lien du bord) ou nombre de nœuds du bord différent. |
 | `missing or ambiguous translated node on Outlet` | 5 | Pas d'image unique d'un nœud à la tolérance. |
 | `periodic face connectivities do not match` | 6 | Zéro ou plusieurs faces outlet pour une face inlet, ou face outlet déjà appariée. |
 | `periodic faces have incompatible node ordering` | 6 | Bons nœuds, mais diagonales différentes. |

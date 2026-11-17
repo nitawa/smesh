@@ -2716,7 +2716,9 @@ namespace
 
     // STEP 3: Check that the Inlet/Outlet faces can receive a periodic diagonal,
     //     and collect their nodes in nodes[].
+    //     Count the faces of each link in nbFacesOfLink[] to find the side border at STEP 4.
     TIDSortedNodeSet nodes[2];
+    map< SMESH_TLink, int > nbFacesOfLink[2];
     const TIDSortedElemSet* sides[] = { &inlet, &outlet };
     vector< const SMDS_MeshElement* > neighbours;
     for ( int iSide = 0; iSide < 2; ++iSide )
@@ -2738,6 +2740,10 @@ namespace
           throw SALOME_Exception( "SplitVolumes: repeated node in a periodic face" );
         // Keep the nodes of the face.
         nodes[ iSide ].insert( faceNodes.begin(), faceNodes.end() );
+        // Count the faces of each link of the face.
+        for ( int i = 0, nb = face->NbNodes(); i < nb; ++i )
+          ++nbFacesOfLink[ iSide ][ SMESH_TLink( face->GetNode( i ),
+                                                 face->GetNode(( i + 1 ) % nb )) ];
 
         // Each periodic face must be on the boundary of one selected volume.
         // Find all the volumes that use the nodes of the face.
@@ -2786,17 +2792,30 @@ namespace
 
     // STEP 4: Calculate the translation from the Inlet to the Outlet.
     // The translation is the vector from the Inlet centre to the Outlet centre.
-    // The centre of a side is the mean position of all its nodes.
-    // Calculate the mean relative to one node of the side.
+    // The centre of a side is the mean position of the nodes on the border of the side.
+    // A link is on the border if only one face of the side uses it.
+    TIDSortedNodeSet borderNodes[2];
+    for ( int iSide = 0; iSide < 2; ++iSide )
+      for ( const auto& linkCount : nbFacesOfLink[ iSide ])
+        if ( linkCount.second == 1 )
+        {
+          borderNodes[ iSide ].insert( linkCount.first.node1() );
+          borderNodes[ iSide ].insert( linkCount.first.node2() );
+        }
+    // The Inlet and the Outlet must have a border, with the same number of nodes.
+    if ( borderNodes[0].empty() || borderNodes[0].size() != borderNodes[1].size() )
+      throw SALOME_Exception( "SplitVolumes: Inlet and Outlet borders are missing "
+                              "or have different numbers of nodes" );
+    // Calculate the mean relative to one node of the border.
     // This prevents the loss of precision when the coordinates are large.
     gp_XYZ centres[2];
     for ( int iSide = 0; iSide < 2; ++iSide )
     {
-      const gp_XYZ origin = SMESH_NodeXYZ( *nodes[ iSide ].begin() );
+      const gp_XYZ origin = SMESH_NodeXYZ( *borderNodes[ iSide ].begin() );
       gp_XYZ sum( 0., 0., 0. );
-      for ( const SMDS_MeshNode* node : nodes[ iSide ])
+      for ( const SMDS_MeshNode* node : borderNodes[ iSide ])
         sum += SMESH_NodeXYZ( node ) - origin;
-      centres[ iSide ] = origin + sum / double( nodes[ iSide ].size() );
+      centres[ iSide ] = origin + sum / double( borderNodes[ iSide ].size() );
     }
     const gp_XYZ translation = centres[1] - centres[0];
 
