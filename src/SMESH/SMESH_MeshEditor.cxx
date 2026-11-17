@@ -2714,9 +2714,8 @@ namespace
       }
     }
 
-    // STEP 3: Examine the faces of the Inlet and of the Outlet.
-    // Index 0 is for the Inlet. Index 1 is for the Outlet.
-    // nodes[] keeps all the nodes of each side.
+    // STEP 3: Check that the Inlet/Outlet faces can receive a periodic diagonal,
+    //     and collect their nodes in nodes[].
     TIDSortedNodeSet nodes[2];
     const TIDSortedElemSet* sides[] = { &inlet, &outlet };
     vector< const SMDS_MeshElement* > neighbours;
@@ -2761,15 +2760,17 @@ namespace
           if ( face->NbNodes() == 4 )
           {
             // The diagonals of the face must be the diagonals of the owner face.
-            // Else getTetraSplitMethod() would not find the diagonal selected on the face.
             if ( !isQuadDiagonal( owner.GetFaceNodes( iF ), face->GetNode(0), face->GetNode(2) ))
-              throw SALOME_Exception( "SplitVolumes: a periodic face has incompatible volume connectivity" );
-            // A quadrangle has two triangles for each diagonal.
-            // If a tetrahedron is already adjacent to one of these triangles, stop with an error.
-            // Then the diagonal of the quadrangle is already set, and we cannot select it.
+              throw SALOME_Exception( "SplitVolumes: the nodes of a periodic quadrangle are not "
+                                      "in the same order as in the face of its volume" );
+            // In a non-conformal mesh (e.g. after a partial SplitVolumes), a tetrahedron can be
+            // adjacent to one triangle of the quadrangle, and IsFreeFace() does not always see it.
+            // This tetrahedron already sets the diagonal, so we cannot select the periodic diagonal.
             const int* nInd = owner.GetFaceNodesIndices( iF );
             if ( TTriangleFacet( nInd[0], nInd[1], nInd[2] ).hasAdjacentVol( neighbour ) ||
-                 TTriangleFacet( nInd[1], nInd[2], nInd[3] ).hasAdjacentVol( neighbour ))
+                 TTriangleFacet( nInd[2], nInd[3], nInd[0] ).hasAdjacentVol( neighbour ) ||
+                 TTriangleFacet( nInd[1], nInd[2], nInd[3] ).hasAdjacentVol( neighbour ) ||
+                 TTriangleFacet( nInd[3], nInd[0], nInd[1] ).hasAdjacentVol( neighbour ))
               throw SALOME_Exception( "SplitVolumes: a periodic quadrangle already "
                                       "has adjacent tetrahedra" );
           }
