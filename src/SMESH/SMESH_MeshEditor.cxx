@@ -2833,9 +2833,10 @@ namespace
       candidates.clear();
       searcher.NodesAround( SMESH_NodeXYZ( node ) + translation, candidates, tolerance );
       // There must be one Outlet node only.
-      // This Outlet node must not agree with a different Inlet node.
-      if ( candidates.size() != 1 || !matchedNodes.insert( candidates[0] ).second )
+      if ( candidates.size() != 1 )
         throw SALOME_Exception( "SplitVolumes: missing or ambiguous translated node on Outlet" );
+      if ( !matchedNodes.insert( candidates[0] ).second )
+        throw SALOME_Exception( "SplitVolumes: Outlet node matched by several Inlet nodes" );
       nodeMap.insert( make_pair( node, candidates[0] ));
     }
 
@@ -2850,7 +2851,7 @@ namespace
       // Get the Outlet nodes of the Inlet face nodes, in the same order.
       translatedNodes.clear();
       for ( int i = 0; i < face->NbNodes(); ++i )
-        translatedNodes.push_back( nodeMap.find( face->GetNode(i) )->second );
+        translatedNodes.push_back( nodeMap.at( face->GetNode(i) ));
       // Find the Outlet face with these nodes. There must be one Outlet face only.
       // This Outlet face must not agree with a different Inlet face.
       found.clear();
@@ -2862,7 +2863,7 @@ namespace
           other = f, ++nbMatches;
       if ( nbMatches != 1 || !matchedFaces.insert( other ).second )
         throw SALOME_Exception( "SplitVolumes: periodic face connectivities do not match" );
-      // A translated diagonal of the Inlet quadrangle must be a diagonal of the Outlet quadrangle.
+      // Check the Outlet node order: the translated diagonal 0-2 must stay a diagonal.
       if ( face->NbNodes() == 4 &&
            std::abs( other->GetNodeIndex( translatedNodes[0] ) -
                      other->GetNodeIndex( translatedNodes[2] )) != 2 )
@@ -2889,8 +2890,7 @@ namespace
       // Keep this diagonal for the Inlet quadrangle.
       // Keep the translated diagonal for the Outlet quadrangle.
       diagonals.insert( SMESH_TLink( n[i], n[i+2] ));
-      diagonals.insert( SMESH_TLink( nodeMap.find( n[i]   )->second,
-                                     nodeMap.find( n[i+2] )->second ));
+      diagonals.insert( SMESH_TLink( nodeMap.at( n[i] ), nodeMap.at( n[i+2] )));
     }
     return diagonals;
   }
